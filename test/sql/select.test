@@ -1,0 +1,26 @@
+# name: test/sql/select.test
+# description: test lpts with basic SELECT queries
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE users (id INTEGER, name VARCHAR, age INTEGER);
+
+# Simple select all
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT * FROM users');
+----
+WITH scan_0 (t0_id, t0_name, t0_age) AS (SELECT id, name, age FROM memory.main.users),  projection_1 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM scan_0) SELECT t1_id AS id, t1_name AS name, t1_age AS age FROM projection_1;
+
+# Select specific columns
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users');
+----
+WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  projection_1 (t1_id, t1_name) AS (SELECT t0_id, t0_name FROM scan_0) SELECT t1_id AS id, t1_name AS name FROM projection_1;
+
+# Select with filter
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT * FROM users WHERE age > 25');
+----
+WITH scan_0 (t0_age, t0_id, t0_name) AS (SELECT age, id, name FROM memory.main.users),  filter_1 AS (SELECT * FROM scan_0 WHERE (t0_age) > (CAST(25 AS INTEGER))),  projection_2 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM filter_1) SELECT t1_id AS id, t1_name AS name, t1_age AS age FROM projection_2;

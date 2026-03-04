@@ -28,8 +28,7 @@ Each CTE corresponds to one operator from the plan. You can read the output top-
    | | DuckDB | Postgres |
    |---|---|---|
    | Table reference | `memory.main.users` | `users` |
-   | Integer cast | `CAST(25 AS INTEGER)` | `25::integer` |
-   | String concat | `a \|\| b` | `a \|\| b` (same) |
+   | Date parsing | `strptime('2024-01-01', '%Y-%m-%d')` | `to_date('2024-01-01', 'YYYY-MM-DD')` |
    | Boolean literal | `true` | `TRUE` |
    | List type | `INTEGER[]` | `integer[]` |
 
@@ -315,9 +314,17 @@ Add a SQL dialect enum and a way for the user to select a dialect. The target di
 
 2. Register a DuckDB setting (using `ExtensionLoader`) that lets users choose the dialect:
    ```
+   D SET lpts_dialect = 'duckdb';
+   D PRAGMA lpts('SELECT strptime(date_col, ''%Y-%m-%d'') FROM events');
+   -- WITH scan_0(t0_date_col) AS (SELECT date_col FROM memory.main.events),
+   -- projection_1(t1_scalar_0) AS (SELECT strptime(t0_date_col, '%Y-%m-%d') FROM scan_0)
+   -- SELECT scalar_0 FROM projection_1;
+
    D SET lpts_dialect = 'postgres';
-   D PRAGMA lpts('SELECT name FROM users WHERE age > 25');
-   -- Output now uses Postgres syntax (e.g. "users" instead of "memory.main.users")
+   D PRAGMA lpts('SELECT strptime(date_col, ''%Y-%m-%d'') FROM events');
+   -- WITH scan_0(t0_date_col) AS (SELECT date_col FROM events),
+   -- projection_1(t1_scalar_0) AS (SELECT to_date(t0_date_col, 'YYYY-MM-DD') FROM scan_0)
+   -- SELECT scalar_0 FROM projection_1;
    ```
 
 3. Pass the dialect to `AstToCteList` (update its signature to accept a `SqlDialect` parameter). For now, the function can ignore the dialect and always produce DuckDB SQL — the point is to have the plumbing in place.

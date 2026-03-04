@@ -557,8 +557,9 @@ unique_ptr<CteList> LogicalPlanToSql::LogicalPlanToCteList() {
 		children_indices.push_back(child_as_node->idx);
 		cte_nodes.emplace_back(std::move(child_as_node));
 	}
-	LPTS_DEBUG_PRINT("[LPTS] LogicalPlanToCteList: after traversal, cte_nodes.size()=" + std::to_string(cte_nodes.size()) +
-	                 " children_indices.size()=" + std::to_string(children_indices.size()));
+	LPTS_DEBUG_PRINT(
+	    "[LPTS] LogicalPlanToCteList: after traversal, cte_nodes.size()=" + std::to_string(cte_nodes.size()) +
+	    " children_indices.size()=" + std::to_string(children_indices.size()));
 	unique_ptr<CteList> to_return;
 	switch (plan->type) {
 	case LogicalOperatorType::LOGICAL_INSERT: {

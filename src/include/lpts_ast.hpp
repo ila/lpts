@@ -101,12 +101,11 @@ public:
 /// GROUP BY + aggregate functions node.
 class AstAggregateNode : public AstNode {
 public:
-	vector<string> group_by_columns;       ///< GROUP BY column references.
-	vector<string> aggregate_expressions;  ///< Aggregate expressions (e.g. "sum(amount)").
+	vector<string> group_by_columns;      ///< GROUP BY column references.
+	vector<string> aggregate_expressions; ///< Aggregate expressions (e.g. "sum(amount)").
 
 	AstAggregateNode(vector<string> group_by_columns, vector<string> aggregate_expressions)
-	    : group_by_columns(std::move(group_by_columns)),
-	      aggregate_expressions(std::move(aggregate_expressions)) {
+	    : group_by_columns(std::move(group_by_columns)), aggregate_expressions(std::move(aggregate_expressions)) {
 	}
 
 	string ToString(int indent = 0) const override;

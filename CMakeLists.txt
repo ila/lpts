@@ -12,7 +12,9 @@ include_directories(src/include)
 set(EXTENSION_SOURCES
     src/lpts_extension.cpp
     src/logical_plan_to_sql.cpp
-    src/lpts_helpers.cpp)
+    src/lpts_helpers.cpp
+    src/lpts_ast.cpp
+    src/lpts_pipeline.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

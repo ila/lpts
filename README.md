@@ -2,7 +2,9 @@
 
 A DuckDB extension that converts a SQL query's logical plan back into a SQL string representation. This is useful for understanding how DuckDB internally represents queries and for compiler/optimizer research.
 
-The extension takes an input SQL query, runs it through DuckDB's parser and planner to obtain a logical plan, then converts that plan into an intermediate representation (IR) composed of CTEs, and finally serializes it back to a SQL string.
+The extension takes an input SQL query, runs it through DuckDB's parser and planner to obtain a logical plan, then converts that plan into a flat CTE (Common Table Expression) list, and finally serializes it back to a SQL string.
+
+The conversion pipeline is: **Logical Plan → CTE List → SQL String**. There is no AST involved.
 
 ## Building
 
@@ -52,9 +54,13 @@ SELECT * FROM lpts_query('SELECT * FROM users WHERE age > 25');
 
 1. The input SQL query is parsed using DuckDB's `Parser`
 2. The parsed statement is planned using DuckDB's `Planner` to produce a `LogicalOperator` tree
-3. `LogicalPlanToSql` traverses the logical plan recursively, converting each operator into an IR node (`GetNode`, `FilterNode`, `ProjectNode`, `AggregateNode`, `JoinNode`, etc.)
-4. Each IR node becomes a CTE (Common Table Expression) in the output
-5. The final IR is serialized back into a SQL string with CTEs
+3. `LogicalPlanToSql` traverses the logical plan **bottom-up** (leaves first), converting each operator into a CTE node (`GetNode`, `FilterNode`, `ProjectNode`, `AggregateNode`, `JoinNode`, etc.)
+4. Each node becomes a CTE (Common Table Expression) in the output
+5. The complete CTE list is serialized back into a SQL string
+
+### Why a CTE list and not an AST?
+
+An AST (Abstract Syntax Tree) has hierarchical parent-child edges that mirror the nesting structure of the query. Instead, we use a **flat, ordered list of CTEs** where dependencies between steps are expressed through name references (e.g. `filter_1` reads `FROM scan_0`). The bottom-up traversal order guarantees that each CTE only references CTEs defined before it. This makes the output easy to read and each step self-contained.
 
 ### Supported operators
 
@@ -72,10 +78,10 @@ SELECT * FROM lpts_query('SELECT * FROM users WHERE age > 25');
 src/
   include/
     lpts_extension.hpp          # Extension class declaration
-    logical_plan_to_sql.hpp     # IR node classes and LogicalPlanToSql converter
+    logical_plan_to_sql.hpp     # CTE node classes and LogicalPlanToSql converter
     lpts_helpers.hpp            # String utility functions
   lpts_extension.cpp            # Extension entry point, pragma and table function registration
-  logical_plan_to_sql.cpp       # IR node ToQuery() implementations and plan traversal
+  logical_plan_to_sql.cpp       # CTE node ToQuery() implementations and plan traversal
   lpts_helpers.cpp              # Helper function implementations
 test/
   sql/

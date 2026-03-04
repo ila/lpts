@@ -15,7 +15,11 @@
 namespace duckdb {
 
 //------------------------------------------------------------------------------
-// PRAGMA lpts('query') — returns a substitute SELECT showing the SQL string
+// PRAGMA lpts('query') — converts a SQL query's logical plan to a SQL string.
+//
+// Uses DuckDB's pragma_query_t mechanism: the function returns a substitute SQL
+// query that DuckDB then executes. So we return "SELECT '<result>' AS sql;"
+// which displays the converted SQL string to the user.
 //------------------------------------------------------------------------------
 
 static string LptsPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
@@ -36,8 +40,8 @@ static string LptsPragmaFunction(ClientContext &context, const FunctionParameter
 #endif
 
 	LogicalPlanToSql lpts(context, planner.plan);
-	auto ir = lpts.LogicalPlanToIR();
-	string result_sql = ir->ToQuery(true);
+	auto cte_list = lpts.LogicalPlanToCteList();
+	string result_sql = cte_list->ToQuery(true);
 
 	// Return a substitute query that displays the result
 	string escaped = EscapeSingleQuotes(result_sql);
@@ -45,7 +49,11 @@ static string LptsPragmaFunction(ClientContext &context, const FunctionParameter
 }
 
 //------------------------------------------------------------------------------
-// Table function lpts_query('query') — for programmatic use
+// Table function lpts_query('query') — for programmatic use.
+//
+// Unlike the PRAGMA, this returns the result as a proper table row, making it
+// usable in SELECT queries and sqllogictest files:
+//   SELECT * FROM lpts_query('SELECT ...');
 //------------------------------------------------------------------------------
 
 struct LptsBindData : public TableFunctionData {
@@ -75,10 +83,10 @@ static unique_ptr<FunctionData> LptsTableBind(ClientContext &context, TableFunct
 #endif
 
 	LogicalPlanToSql lpts(context, planner.plan);
-	auto ir = lpts.LogicalPlanToIR();
+	auto cte_list = lpts.LogicalPlanToCteList();
 
 	auto result = make_uniq<LptsBindData>();
-	result->result_sql = ir->ToQuery(true);
+	result->result_sql = cte_list->ToQuery(true);
 
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("sql");

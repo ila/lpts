@@ -4,26 +4,64 @@
 
 namespace duckdb {
 
-/// Base node for the intermediate representation (IR) of a SQL query. Virtual class.
-class IRNode {
+//==============================================================================
+// CTE List Node Hierarchy
+//==============================================================================
+//
+// The conversion pipeline is: Logical Plan → CTE List → SQL String.
+//
+// There is no AST involved. The CTE list is a flat, ordered list of CTEs
+// (Common Table Expressions). Each logical operator from DuckDB's plan becomes
+// one CTE. Dependencies between CTEs are expressed through name references
+// (e.g. a filter CTE reads FROM its child scan CTE by name), not through
+// parent-child pointers.
+//
+// The bottom-up traversal of the logical plan guarantees that each CTE only
+// references CTEs defined before it.
+//
+// Example: "SELECT name FROM users WHERE age > 25" produces:
+//
+//   WITH scan_0(t0_name, t0_age) AS (SELECT name, age FROM memory.main.users),
+//        filter_1 AS (SELECT * FROM scan_0 WHERE (t0_age) > (25)),
+//        projection_2(t2_name) AS (SELECT t0_name FROM filter_1)
+//   SELECT t2_name AS name FROM projection_2;
+//
+// Class hierarchy:
+//   CteBaseNode (base)
+//   ├── RootNode (virtual) — terminal nodes that produce the final query
+//   │   ├── FinalReadNode — the closing SELECT that renames CTE columns back
+//   │   └── InsertNode — INSERT INTO ... SELECT * FROM <cte>
+//   └── CteNode (virtual) — intermediate nodes, each becomes a WITH clause
+//       ├── GetNode        — table scan
+//       ├── FilterNode     — WHERE clause
+//       ├── ProjectNode    — column selection / expressions
+//       ├── AggregateNode  — GROUP BY + aggregate functions
+//       ├── JoinNode       — INNER/LEFT/RIGHT/OUTER JOIN
+//       └── UnionNode      — UNION / UNION ALL
+//==============================================================================
+
+/// Base node for all nodes in the CTE list. Virtual class.
+class CteBaseNode {
 public:
-	virtual ~IRNode() = default;
+	virtual ~CteBaseNode() = default;
+	/// Produce the SQL fragment for this node (the body inside a CTE's AS (...)).
 	virtual string ToQuery() = 0;
 	// Constructor.
-	explicit IRNode(const size_t index) : idx(index) {
+	explicit CteBaseNode(const size_t index) : idx(index) {
 	}
-	const size_t idx; // Number of the node used for giving it a name.
+	const size_t idx; // Unique index used for naming (e.g. scan_0, filter_1).
 };
 
-/// Intermediate virtual class, used to distinguish from CteNode.
-class RootNode : public IRNode {
+/// Virtual class for terminal/root nodes (SELECT result or INSERT).
+/// These are NOT wrapped in a CTE — they appear as the final statement.
+class RootNode : public CteBaseNode {
 public:
-	explicit RootNode(const size_t index) : IRNode(index) {
+	explicit RootNode(const size_t index) : CteBaseNode(index) {
 	}
 };
 
-/// Final node specifically for SELECT queries,
-/// Used to convert back CTE column names to their intended alias or "original" name.
+/// Final node specifically for SELECT queries.
+/// Renames CTE column names back to the original column names the user expects.
 class FinalReadNode : public RootNode {
 	// Attributes.
 	string child_cte_name;
@@ -61,19 +99,20 @@ public:
 	string ToQuery() override;
 };
 
-/// Node for update queries. Cannot be a CTE.
+/// Node for update queries. Cannot be a CTE. (Not yet implemented.)
 class UpdateNode : public RootNode {
 public:
 	~UpdateNode() override = default;
 };
 
-/// Node for deletion queries. Cannot be a CTE.
+/// Node for deletion queries. Cannot be a CTE. (Not yet implemented.)
 class DeleteNode : public RootNode {
 public:
 	~DeleteNode() override = default;
 };
 
-class CteNode : public IRNode {
+/// Virtual class for intermediate CTE nodes. Each becomes a WITH clause.
+class CteNode : public CteBaseNode {
 public:
 	~CteNode() override = default;
 	// Explicitly delete copy constructor to avoid issues.
@@ -81,15 +120,16 @@ public:
 	CteNode &operator=(const CteNode &) = delete;
 	// Constructor.
 	explicit CteNode(const size_t index, string name, vector<string> col_list)
-	    : IRNode(index), cte_name(std::move(name)), cte_column_list(std::move(col_list)) {
+	    : CteBaseNode(index), cte_name(std::move(name)), cte_column_list(std::move(col_list)) {
 	}
 	// Requires ToQuery() to be implemented by derived classes.
 	/// Create a CTE-like string for the Node (excluding the WITH keyword).
+	/// Example output: "scan_0(t0_name, t0_age) AS (SELECT name, age FROM ...)"
 	string ToCteQuery();
 	// Attributes.
-	/// The name of the CTE (so what comes after WITH).
+	/// The name of the CTE (e.g. "scan_0", "filter_1").
 	string cte_name;
-	/// The "external" names of the CTE columns (the name ancestors need to access columns).
+	/// The "external" names of the CTE columns (the names ancestors use to reference them).
 	vector<string> cte_column_list;
 };
 
@@ -154,7 +194,7 @@ public:
 class AggregateNode : public CteNode {
 	// Attributes.
 	string child_cte_name;
-	vector<string> group_by_columns; // If empty, is scalar aggregate.
+	vector<string> group_by_columns; // If empty, is scalar aggregate (e.g. count(*) with no GROUP BY).
 	vector<string> aggregate_expressions;
 
 public:
@@ -207,25 +247,31 @@ public:
 	string ToQuery() override;
 };
 
-/// Intermediate representation (as a vector of CTEs along with a final node).
-class IRStruct {
+/// The complete CTE list: an ordered list of CTE nodes + one final (root) node.
+/// Calling ToQuery() serializes the whole thing into a single SQL string.
+class CteList {
 	// Attributes.
-	vector<unique_ptr<CteNode>> nodes;
-	unique_ptr<RootNode> final_node;
+	vector<unique_ptr<CteNode>> nodes; ///< Ordered list of CTEs (leaf-to-root).
+	unique_ptr<RootNode> final_node;   ///< The closing statement (SELECT or INSERT).
 
 public:
 	// Constructor.
-	IRStruct(vector<unique_ptr<CteNode>> _nodes, unique_ptr<RootNode> _final_node)
+	CteList(vector<unique_ptr<CteNode>> _nodes, unique_ptr<RootNode> _final_node)
 	    : nodes(std::move(_nodes)), final_node(std::move(_final_node)) {
 	}
-	/// Create a DuckDB SQL query directly from the immediate representation.
+	/// Serialize the CTE list into a SQL query string.
 	/// If `use_newlines` is true, the string uses newlines between CTEs for readability.
 	string ToQuery(bool use_newlines);
 };
 
+/// Converts a DuckDB LogicalOperator tree into a CteList, then to a SQL string.
+///
+/// Pipeline: Logical Plan → CTE List → SQL String
 class LogicalPlanToSql {
 private:
-	/// Struct with a ColumnBinding that implements `<`, such that using it in a map becomes possible.
+	/// Wrapper around DuckDB's ColumnBinding that implements operator< so it can
+	/// be used as a key in std::map. A ColumnBinding is a (table_index, column_index)
+	/// pair that uniquely identifies a column within the logical plan.
 	struct MappableColumnBinding {
 		ColumnBinding cb;
 		MappableColumnBinding(const ColumnBinding _column_binding) : cb(std::move(_column_binding)) {
@@ -235,45 +281,55 @@ private:
 			return std::tie(cb.table_index, cb.column_index) < std::tie(other.cb.table_index, other.cb.column_index);
 		}
 	};
+
+	/// Tracks metadata about a single column as it flows through the plan.
+	/// Each column gets a unique name like "t0_name" (table_index + column_name)
+	/// so that CTE columns can reference each other unambiguously.
 	struct ColStruct {
 		const idx_t table_index;
-		string column_name;
-		string alias; // Optional. Empty string if not defined.
+		string column_name; ///< The original column name from the table.
+		string alias;       ///< Optional alias (e.g. from an expression). Empty if not set.
 		// Constructor.
 		ColStruct(const idx_t _table_index, string _column_name, string _alias)
 		    : table_index(_table_index), column_name(std::move(_column_name)), alias(std::move(_alias)) {
 		}
-		/// Generate a column name for this ColStruct. Uses `alias` if defined; `column_name` otherwise.
+		/// Generate a unique column name: "t{table_index}_{alias or column_name}".
 		string ToUniqueColumnName() const;
 	};
 
 	// Input to the class, used to traverse the query plan.
 	ClientContext &context;
-	/// The tree that should be converted to an AST.
+	/// The logical plan tree to convert into a flat CTE list.
 	unique_ptr<LogicalOperator> &plan;
 
-	/// Used to enumerate the CTEs.
+	/// Counter used to give each CTE a unique index (scan_0, filter_1, ...).
 	size_t node_count = 0;
-	/// Used to eventually create the IRStruct object needed for the IR.
+	/// Accumulates CTE nodes in bottom-up order during traversal.
 	vector<unique_ptr<CteNode>> cte_nodes;
-	/// Used for consistent column naming across all nodes.
+	/// Global mapping from DuckDB's internal ColumnBinding → our ColStruct.
+	/// This is the central bookkeeping structure: as we traverse the plan bottom-up,
+	/// each operator registers its output columns here so that parent operators can
+	/// resolve column references to the correct CTE column names.
 	std::map<MappableColumnBinding, unique_ptr<ColStruct>> column_map;
 
-	/// Convert an expression into a string with table aliases. Contains some recursion.
+	/// Recursively convert a bound Expression (e.g. a comparison like "age > 25")
+	/// into a SQL string, replacing ColumnBinding references with CTE column names.
 	string ExpressionToAliasedString(const unique_ptr<Expression> &expression) const;
-	/// Create a CTE from a LogicalOperator.
+	/// Convert a single LogicalOperator into the corresponding CteNode.
+	/// `children_indices` are indices into `cte_nodes` for this operator's children.
 	unique_ptr<CteNode> CreateCteNode(unique_ptr<LogicalOperator> &subplan, const vector<size_t> &children_indices);
-	/// Traverse the logical plan recursively, except for the root.
+	/// Walk the plan tree bottom-up: recursively process children first, then
+	/// create a CteNode for the current operator and append it to `cte_nodes`.
 	unique_ptr<CteNode> RecursiveTraversal(unique_ptr<LogicalOperator> &sub_plan);
 
 public:
 	LogicalPlanToSql(ClientContext &_context, unique_ptr<LogicalOperator> &_plan) : context(_context), plan(_plan) {
 	}
 
-	/// Convert the logical plan to an immediate representation (IRStruct).
-	unique_ptr<IRStruct> LogicalPlanToIR();
-	/// Convert the IR to a SQL string directly.
-	static string IRToSql(unique_ptr<IRStruct> &ir_struct);
+	/// Convert the logical plan to a CTE list.
+	unique_ptr<CteList> LogicalPlanToCteList();
+	/// Convert a CTE list to a SQL string directly.
+	static string CteListToSql(unique_ptr<CteList> &cte_list);
 };
 
 } // namespace duckdb

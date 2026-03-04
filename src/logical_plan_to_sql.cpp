@@ -1,3 +1,18 @@
+//==============================================================================
+// logical_plan_to_sql.cpp
+//
+// Converts DuckDB's LogicalOperator tree into a flat CTE-based SQL string.
+//
+// The main entry point is LogicalPlanToSql::LogicalPlanToCteList(), which:
+//   1. Walks the logical plan tree bottom-up (leaves first).
+//   2. For each operator (scan, filter, projection, ...), creates a CteNode
+//      and registers its output columns in `column_map`.
+//   3. Parent operators look up child columns through `column_map` to produce
+//      correct CTE column references.
+//   4. The result is a CteList (ordered list of CTEs + a final SELECT/INSERT)
+//      that can be serialized to a SQL string via ToQuery().
+//==============================================================================
+
 #include "logical_plan_to_sql.hpp"
 #include "lpts_helpers.hpp"
 #include "lpts_debug.hpp"
@@ -26,10 +41,17 @@
 
 namespace duckdb {
 
+//------------------------------------------------------------------------------
+// ToQuery() implementations for each IR node type.
+// Each returns the SQL fragment for its CTE body (the part inside AS (...)).
+//------------------------------------------------------------------------------
+
+/// FinalReadNode: the closing SELECT that renames CTE columns back to their
+/// original names (e.g. "SELECT t2_name AS name FROM projection_2").
 string FinalReadNode::ToQuery() {
 	const size_t col_count = final_column_list.size();
 	if (child_cte_column_list.size() != col_count) {
-		throw std::runtime_error("Size mismatch between column lists!");
+		throw InternalException("LPTS: Size mismatch between column lists");
 	}
 	vector<string> merged_list;
 	// Assign the final column names to the CTE column names. Format: "cte_col AS final_col".
@@ -180,7 +202,9 @@ string UnionNode::ToQuery() {
 	return union_str.str();
 }
 
-string IRStruct::ToQuery(const bool use_newlines) {
+/// Serialize the entire CTE list into a SQL string.
+/// Output format: WITH cte_0(...) AS (...), cte_1(...) AS (...), ... SELECT ...;
+string CteList::ToQuery(const bool use_newlines) {
 	std::ostringstream sql_str;
 	if (!nodes.empty()) {
 		sql_str << "WITH ";
@@ -205,6 +229,10 @@ string LogicalPlanToSql::ColStruct::ToUniqueColumnName() const {
 	return "t" + std::to_string(table_index) + "_" + (alias.empty() ? column_name : alias);
 }
 
+//------------------------------------------------------------------------------
+// ExpressionToAliasedString: convert a bound expression tree into a SQL string.
+// Column references are replaced with their CTE column names via column_map.
+//------------------------------------------------------------------------------
 string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> &expression) const {
 	const ExpressionClass e_class = expression->GetExpressionClass();
 	std::ostringstream expr_str;
@@ -256,6 +284,17 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 	return expr_str.str();
 }
 
+//------------------------------------------------------------------------------
+// CreateCteNode: convert one LogicalOperator into the corresponding CteNode.
+//
+// For each operator type, we:
+//   1. Extract relevant info (table name, expressions, join conditions, etc.)
+//   2. Register output columns in column_map so parent operators can find them
+//   3. Return the CteNode with its SQL fragment
+//
+// The children_indices parameter tells us which entries in cte_nodes[] correspond
+// to the children of this operator (already processed, since we go bottom-up).
+//------------------------------------------------------------------------------
 unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> &subplan,
                                                     const vector<size_t> &children_indices) {
 	const size_t my_index = node_count++;
@@ -270,6 +309,9 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 
 	switch (subplan->type) {
 	case LogicalOperatorType::LOGICAL_GET: {
+		// GET = table scan. Reads columns from a physical table.
+		// We register each output column in column_map so that parent operators
+		// (filter, projection, etc.) can resolve column references.
 		const LogicalGet &plan_as_get = subplan->Cast<LogicalGet>();
 		LPTS_DEBUG_PRINT("[LPTS] GET: table_index=" + std::to_string(plan_as_get.table_index) +
 		                 " names.size()=" + std::to_string(plan_as_get.names.size()));
@@ -332,6 +374,9 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		                             std::move(conditions));
 	}
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
+		// PROJECTION = column selection and computed expressions.
+		// For simple column references, we look up the child's column in column_map.
+		// For expressions (e.g. "a + b"), we convert them to SQL strings.
 		const LogicalProjection &plan_as_projection = subplan->Cast<LogicalProjection>();
 		const size_t table_index = plan_as_projection.table_index;
 		vector<string> column_names;
@@ -443,7 +488,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		const auto &lhs_bindings = subplan->children[0]->GetColumnBindings();
 		const auto &union_bindings = subplan->GetColumnBindings();
 		if (lhs_bindings.size() != union_bindings.size()) {
-			throw std::runtime_error("Size mismatch between column bindings!");
+			throw InternalException("LPTS: Size mismatch between column bindings");
 		}
 		for (size_t i = 0; i < lhs_bindings.size(); ++i) {
 			const unique_ptr<ColStruct> &lhs_col_struct = column_map.at(lhs_bindings[i]);
@@ -481,6 +526,8 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 	}
 }
 
+/// Bottom-up traversal: process all children first, then create a CteNode for
+/// this operator. This guarantees CTEs are ordered leaf-to-root.
 unique_ptr<CteNode> LogicalPlanToSql::RecursiveTraversal(unique_ptr<LogicalOperator> &sub_plan) {
 	LPTS_DEBUG_PRINT("[LPTS] RecursiveTraversal: type=" + LogicalOperatorToString(sub_plan->type) +
 	                 " num_children=" + std::to_string(sub_plan->children.size()));
@@ -494,11 +541,15 @@ unique_ptr<CteNode> LogicalPlanToSql::RecursiveTraversal(unique_ptr<LogicalOpera
 	return to_return;
 }
 
-unique_ptr<IRStruct> LogicalPlanToSql::LogicalPlanToIR() {
+/// Main entry point. Traverses the entire logical plan and builds the CTE list.
+/// The root operator is handled specially: INSERT becomes an InsertNode,
+/// while SELECT-like queries get a FinalReadNode that maps CTE column names
+/// back to the original column names the user expects.
+unique_ptr<CteList> LogicalPlanToSql::LogicalPlanToCteList() {
 	if (node_count != 0) {
-		throw std::runtime_error("This function can only be called once.");
+		throw InternalException("LPTS: LogicalPlanToCteList can only be called once");
 	}
-	LPTS_DEBUG_PRINT("[LPTS] LogicalPlanToIR: root type=" + LogicalOperatorToString(plan->type) +
+	LPTS_DEBUG_PRINT("[LPTS] LogicalPlanToCteList: root type=" + LogicalOperatorToString(plan->type) +
 	                 " num_children=" + std::to_string(plan->children.size()));
 	vector<size_t> children_indices;
 	for (auto &child : plan->children) {
@@ -506,23 +557,23 @@ unique_ptr<IRStruct> LogicalPlanToSql::LogicalPlanToIR() {
 		children_indices.push_back(child_as_node->idx);
 		cte_nodes.emplace_back(std::move(child_as_node));
 	}
-	LPTS_DEBUG_PRINT("[LPTS] LogicalPlanToIR: after traversal, cte_nodes.size()=" + std::to_string(cte_nodes.size()) +
+	LPTS_DEBUG_PRINT("[LPTS] LogicalPlanToCteList: after traversal, cte_nodes.size()=" + std::to_string(cte_nodes.size()) +
 	                 " children_indices.size()=" + std::to_string(children_indices.size()));
-	unique_ptr<IRStruct> to_return;
+	unique_ptr<CteList> to_return;
 	switch (plan->type) {
 	case LogicalOperatorType::LOGICAL_INSERT: {
 		const LogicalInsert &insert_ref = plan->Cast<LogicalInsert>();
 		unique_ptr<InsertNode> insert_node =
 		    make_uniq<InsertNode>(node_count++, insert_ref.table.name, cte_nodes[children_indices[0]]->cte_name,
 		                          insert_ref.on_conflict_info.action_type);
-		to_return = make_uniq<IRStruct>(std::move(cte_nodes), std::move(insert_node));
+		to_return = make_uniq<CteList>(std::move(cte_nodes), std::move(insert_node));
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_DELETE: {
-		throw std::runtime_error("Not yet implemented.");
+		throw NotImplementedException("LPTS: DELETE is not yet supported");
 	}
 	case LogicalOperatorType::LOGICAL_UPDATE: {
-		throw std::runtime_error("Not yet implemented.");
+		throw NotImplementedException("LPTS: UPDATE is not yet supported");
 	}
 	default: {
 		unique_ptr<CteNode> last_cte = CreateCteNode(plan, children_indices);
@@ -534,13 +585,13 @@ unique_ptr<IRStruct> LogicalPlanToSql::LogicalPlanToIR() {
 		unique_ptr<FinalReadNode> final_node = make_uniq<FinalReadNode>(
 		    node_count++, last_cte->cte_name, last_cte->cte_column_list, std::move(final_column_list));
 		cte_nodes.emplace_back(std::move(last_cte));
-		to_return = make_uniq<IRStruct>(std::move(cte_nodes), std::move(final_node));
+		to_return = make_uniq<CteList>(std::move(cte_nodes), std::move(final_node));
 	}
 	}
 	return to_return;
 }
 
-string LogicalPlanToSql::IRToSql(unique_ptr<IRStruct> &ir_struct) {
+string LogicalPlanToSql::CteListToSql(unique_ptr<CteList> &ir_struct) {
 	return ir_struct->ToQuery(false);
 }
 

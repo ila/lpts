@@ -202,6 +202,20 @@ string UnionNode::ToQuery() {
 	return union_str.str();
 }
 
+string ExceptNode::ToQuery() {
+	std::ostringstream except_str;
+	except_str << "SELECT * FROM ";
+	except_str << left_cte_name;
+	if (is_except_all) {
+		except_str << " EXCEPT ALL ";
+	} else {
+		except_str << " EXCEPT ";
+	}
+	except_str << "SELECT * FROM ";
+	except_str << right_cte_name;
+	return except_str.str();
+}
+
 /// Serialize the entire CTE list into a SQL string.
 /// Output format: WITH cte_0(...) AS (...), cte_1(...) AS (...), ... SELECT ...;
 string CteList::ToQuery(const bool use_newlines) {
@@ -499,6 +513,25 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		}
 		return make_uniq<UnionNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name,
 		                            cte_nodes[children_indices[1]]->cte_name, plan_as_union.setop_all);
+	}
+	case LogicalOperatorType::LOGICAL_EXCEPT: {
+		const LogicalSetOperation &plan_as_except = subplan->Cast<LogicalSetOperation>();
+		const size_t table_index = plan_as_except.table_index;
+		vector<string> cte_column_names;
+		const auto &lhs_bindings = subplan->children[0]->GetColumnBindings();
+		const auto &except_bindings = subplan->GetColumnBindings();
+		if (lhs_bindings.size() != except_bindings.size()) {
+			throw InternalException("LPTS: Size mismatch between column bindings");
+		}
+		for (size_t i = 0; i < lhs_bindings.size(); ++i) {
+			const unique_ptr<ColStruct> &lhs_col_struct = column_map.at(lhs_bindings[i]);
+			unique_ptr<ColStruct> new_col_struct =
+			    make_uniq<ColStruct>(table_index, lhs_col_struct->column_name, lhs_col_struct->alias);
+			cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
+			column_map[except_bindings[i]] = std::move(new_col_struct);
+		}
+		return make_uniq<ExceptNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name,
+		                             cte_nodes[children_indices[1]]->cte_name, plan_as_except.setop_all);
 	}
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
 		const LogicalComparisonJoin &plan_as_join = subplan->Cast<LogicalComparisonJoin>();

@@ -37,7 +37,8 @@ namespace duckdb {
 //       ├── ProjectNode    — column selection / expressions
 //       ├── AggregateNode  — GROUP BY + aggregate functions
 //       ├── JoinNode       — INNER/LEFT/RIGHT/OUTER JOIN
-//       └── UnionNode      — UNION / UNION ALL
+//       ├── UnionNode      — UNION / UNION ALL
+//       └── ExceptNode     — EXCEPT / EXCEPT ALL
 //==============================================================================
 
 /// Base node for all nodes in the CTE list. Virtual class.
@@ -242,6 +243,24 @@ public:
 	    : CteNode(index, "union_" + std::to_string(index), std::move(cte_column_names)),
 	      left_cte_name(std::move(_left_cte_name)), right_cte_name(std::move(_right_cte_name)),
 	      is_union_all(union_all) {
+	}
+	// Functions.
+	string ToQuery() override;
+};
+
+class ExceptNode : public CteNode {
+	// Attributes.
+	string left_cte_name;
+	string right_cte_name;
+	const bool is_except_all; // Whether to use "EXCEPT ALL" or just "EXCEPT".
+public:
+	~ExceptNode() override = default;
+	// Constructor.
+	ExceptNode(const size_t index, vector<string> cte_column_names, string _left_cte_name, string _right_cte_name,
+	           const bool except_all)
+	    : CteNode(index, "except_" + std::to_string(index), std::move(cte_column_names)),
+	      left_cte_name(std::move(_left_cte_name)), right_cte_name(std::move(_right_cte_name)),
+	      is_except_all(except_all) {
 	}
 	// Functions.
 	string ToQuery() override;

@@ -58,9 +58,9 @@ SELECT * FROM lpts_query('SELECT * FROM users WHERE age > 25');
 4. Each node becomes a CTE (Common Table Expression) in the output
 5. The complete CTE list is serialized back into a SQL string
 
-### Why a CTE list and not an AST?
+### CTE list
 
-An AST (Abstract Syntax Tree) has hierarchical parent-child edges that mirror the nesting structure of the query. Instead, we use a **flat, ordered list of CTEs** where dependencies between steps are expressed through name references (e.g. `filter_1` reads `FROM scan_0`). The bottom-up traversal order guarantees that each CTE only references CTEs defined before it. This makes the output easy to read and each step self-contained.
+We use a **flat, ordered list of CTEs** where dependencies between steps are expressed through name references (e.g. `filter_1` reads `FROM scan_0`). The bottom-up traversal order guarantees that each CTE only references CTEs defined before it. This makes the output easy to read and each step self-contained.
 
 ### Supported operators
 

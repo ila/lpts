@@ -23,6 +23,7 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -32,7 +33,6 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_set.hpp"
 #include "duckdb/planner/planner.hpp"
-#include "duckdb/planner/tableref/bound_basetableref.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_cross_product.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
@@ -279,6 +279,18 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 		expr_str << " AS " + expr_cast.return_type.ToString() + ")";
 		break;
 	}
+	case (ExpressionClass::BOUND_FUNCTION): {
+		const BoundFunctionExpression &func_expr = expression->Cast<BoundFunctionExpression>();
+		expr_str << func_expr.function.name << "(";
+		for (idx_t i = 0; i < func_expr.children.size(); i++) {
+			if (i > 0) {
+				expr_str << ", ";
+			}
+			expr_str << ExpressionToAliasedString(func_expr.children[i]);
+		}
+		expr_str << ")";
+		break;
+	}
 	case (ExpressionClass::BOUND_CONJUNCTION): {
 		const BoundConjunctionExpression &conjunction_expr = expression->Cast<BoundConjunctionExpression>();
 		expr_str << "(";
@@ -415,7 +427,9 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 				} else {
 					scalar_alias = "scalar_" + std::to_string(i);
 				}
-				column_map[new_cb] = make_uniq<ColStruct>(table_index, expr_str, scalar_alias);
+				auto new_col_struct = make_uniq<ColStruct>(table_index, expr_str, scalar_alias);
+				cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
+				column_map[new_cb] = std::move(new_col_struct);
 			}
 		}
 		return make_uniq<ProjectNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name,

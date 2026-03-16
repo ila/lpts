@@ -182,9 +182,8 @@ private:
 				}
 			}
 
-			return make_uniq<AstGetNode>(catalog_name, schema_name, table_name, table_index,
-			                            std::move(column_names), std::move(cte_column_names),
-			                            std::move(table_filters));
+			return make_uniq<AstGetNode>(catalog_name, schema_name, table_name, table_index, std::move(column_names),
+			                             std::move(cte_column_names), std::move(table_filters));
 		}
 
 		//----------------------------------------------------------------------
@@ -269,7 +268,8 @@ private:
 				}
 				// Join child expressions with commas
 				for (size_t ci = 0; ci < child_exprs.size(); ++ci) {
-					if (ci > 0) agg_str << ", ";
+					if (ci > 0)
+						agg_str << ", ";
 					agg_str << child_exprs[ci];
 				}
 				agg_str << ")";
@@ -281,7 +281,7 @@ private:
 			}
 
 			return make_uniq<AstAggregateNode>(std::move(group_names), std::move(agg_expressions),
-			                                    std::move(cte_column_names));
+			                                   std::move(cte_column_names));
 		}
 
 		//----------------------------------------------------------------------
@@ -442,7 +442,7 @@ private:
 			string catalog_out = (dialect == SqlDialect::POSTGRES) ? "" : get.catalog;
 			string schema_out = (dialect == SqlDialect::POSTGRES) ? "" : get.schema;
 			return make_uniq<GetNode>(my_index, get.cte_column_names, catalog_out, schema_out, get.table_name,
-			                         get.table_index, get.table_filters, get.column_names);
+			                          get.table_index, get.table_filters, get.column_names);
 		}
 
 		if (type == "Filter") {
@@ -456,22 +456,22 @@ private:
 			const AstProjectNode &proj = static_cast<const AstProjectNode &>(ast_node);
 			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
 			return make_uniq<ProjectNode>(my_index, proj.cte_column_names, child_cte_name, proj.expressions,
-			                             proj.table_index);
+			                              proj.table_index);
 		}
 
 		if (type == "Aggregate") {
 			const AstAggregateNode &agg = static_cast<const AstAggregateNode &>(ast_node);
 			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			return make_uniq<AggregateNode>(my_index, agg.cte_column_names, child_cte_name,
-			                               agg.group_by_columns, agg.aggregate_expressions);
+			return make_uniq<AggregateNode>(my_index, agg.cte_column_names, child_cte_name, agg.group_by_columns,
+			                                agg.aggregate_expressions);
 		}
 
 		if (type == "Join") {
 			const AstJoinNode &join = static_cast<const AstJoinNode &>(ast_node);
 			const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
 			const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
-			return make_uniq<JoinNode>(my_index, join.cte_column_names, left_cte_name, right_cte_name,
-			                          join.join_type, join.conditions);
+			return make_uniq<JoinNode>(my_index, join.cte_column_names, left_cte_name, right_cte_name, join.join_type,
+			                           join.conditions);
 		}
 
 		if (type == "Union") {
@@ -500,9 +500,9 @@ public:
 		// Build the FinalReadNode: maps CTE column names back to original names.
 		vector<string> final_column_list;
 		const string &type = root.NodeType();
-		const vector<string> &cte_cols =
-		    (type == "Project") ? static_cast<const AstProjectNode &>(root).cte_column_names
-		                        : last_cte->cte_column_list;
+		const vector<string> &cte_cols = (type == "Project")
+		                                     ? static_cast<const AstProjectNode &>(root).cte_column_names
+		                                     : last_cte->cte_column_list;
 
 		for (const string &cte_col : cte_cols) {
 			// cte_col = "t1_name"  →  strip "tN_" prefix to get user-visible name.

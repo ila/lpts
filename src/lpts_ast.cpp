@@ -64,8 +64,8 @@ string AstFilterNode::ToString(int indent) const {
 
 string AstProjectNode::ToString(int indent) const {
 	string result = Indent(indent) + "Project";
-	result += " (table_index=" + std::to_string(table_index) + ", expressions=" + std::to_string(expressions.size()) +
-	          ")";
+	result +=
+	    " (table_index=" + std::to_string(table_index) + ", expressions=" + std::to_string(expressions.size()) + ")";
 	for (size_t i = 0; i < expressions.size(); i++) {
 		result += "\n" + Indent(indent + 2) + cte_column_names[i] + " <- " + expressions[i];
 	}

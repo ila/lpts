@@ -143,7 +143,6 @@ private:
 	//--------------------------------------------------------------------------
 	unique_ptr<AstNode> BuildNode(unique_ptr<LogicalOperator> &op) {
 		switch (op->type) {
-
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_GET: {
 			const LogicalGet &get = op->Cast<LogicalGet>();

@@ -2,6 +2,7 @@
 
 #include "lpts_extension.hpp"
 #include "logical_plan_to_sql.hpp"
+#include "lpts_pipeline.hpp"
 #include "lpts_helpers.hpp"
 #include "lpts_debug.hpp"
 
@@ -11,8 +12,21 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/planner.hpp"
+#include "duckdb/main/config.hpp"
 
 namespace duckdb {
+
+//------------------------------------------------------------------------------
+// Helper: read lpts_dialect from the session settings.
+//   Defaults to DuckDB if not set.
+//------------------------------------------------------------------------------
+static SqlDialect ReadDialect(ClientContext &context) {
+	Value dialect_val;
+	if (context.TryGetCurrentSetting("lpts_dialect", dialect_val)) {
+		return ParseSqlDialect(dialect_val.GetValue<string>());
+	}
+	return SqlDialect::DUCKDB;
+}
 
 //------------------------------------------------------------------------------
 // PRAGMA lpts('query') — converts a SQL query's logical plan to a SQL string.
@@ -39,8 +53,9 @@ static string LptsPragmaFunction(ClientContext &context, const FunctionParameter
 	planner.plan->Print();
 #endif
 
-	LogicalPlanToSql lpts(context, planner.plan);
-	auto cte_list = lpts.LogicalPlanToCteList();
+	auto ast = LogicalPlanToAst(context, planner.plan);
+	SqlDialect dialect = ReadDialect(context);
+	auto cte_list = AstToCteList(*ast, dialect);
 	string result_sql = cte_list->ToQuery(true);
 
 	// Return a substitute query that displays the result
@@ -82,8 +97,9 @@ static unique_ptr<FunctionData> LptsTableBind(ClientContext &context, TableFunct
 	planner.plan->Print();
 #endif
 
-	LogicalPlanToSql lpts(context, planner.plan);
-	auto cte_list = lpts.LogicalPlanToCteList();
+	auto ast = LogicalPlanToAst(context, planner.plan);
+	SqlDialect dialect = ReadDialect(context);
+	auto cte_list = AstToCteList(*ast, dialect);
 
 	auto result = make_uniq<LptsBindData>();
 	result->result_sql = cte_list->ToQuery(true);
@@ -114,6 +130,13 @@ static void LptsTableFunc(ClientContext &context, TableFunctionInput &data_p, Da
 //------------------------------------------------------------------------------
 
 static void LoadInternal(ExtensionLoader &loader) {
+	// Register the lpts_dialect session setting.
+	// Users can change it with: SET lpts_dialect = 'postgres';
+	DBConfig &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	config.AddExtensionOption("lpts_dialect",
+	                          "SQL dialect for lpts output. Valid values: 'duckdb' (default), 'postgres'",
+	                          LogicalType::VARCHAR, Value("duckdb"));
+
 	// Register PRAGMA lpts('query')
 	auto pragma = PragmaFunction::PragmaCall("lpts", LptsPragmaFunction, {LogicalType::VARCHAR});
 	loader.RegisterFunction(pragma);

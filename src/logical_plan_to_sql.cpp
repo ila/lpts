@@ -21,7 +21,7 @@
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -113,11 +113,13 @@ string GetNode::ToQuery() {
 		get_str << VecToSeparatedList(column_names);
 	}
 	get_str << " FROM ";
-	get_str << catalog;
-	get_str << ".";
-	get_str << schema;
-	get_str << ".";
-	get_str << table_name;
+	if (!catalog.empty()) {
+		// Fully-qualified: catalog.schema.table (DuckDB dialect)
+		get_str << catalog << "." << schema << "." << table_name;
+	} else {
+		// Unqualified: table only (Postgres dialect)
+		get_str << table_name;
+	}
 	if (!table_filters.empty()) {
 		get_str << " WHERE ";
 		get_str << VecToSeparatedList(table_filters);

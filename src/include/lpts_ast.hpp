@@ -55,11 +55,15 @@ public:
 	string schema;
 	string table_name;
 	size_t table_index;
-	vector<string> column_names;
+	vector<string> column_names;     ///< Physical column names (e.g. "age", "name").
+	vector<string> cte_column_names; ///< CTE-scoped names (e.g. "t0_age", "t0_name").
+	vector<string> table_filters;    ///< Pushdown filters (as SQL strings).
 
-	AstGetNode(string catalog, string schema, string table_name, size_t table_index, vector<string> column_names)
+	AstGetNode(string catalog, string schema, string table_name, size_t table_index, vector<string> column_names,
+	           vector<string> cte_column_names, vector<string> table_filters)
 	    : catalog(std::move(catalog)), schema(std::move(schema)), table_name(std::move(table_name)),
-	      table_index(table_index), column_names(std::move(column_names)) {
+	      table_index(table_index), column_names(std::move(column_names)),
+	      cte_column_names(std::move(cte_column_names)), table_filters(std::move(table_filters)) {
 	}
 
 	string ToString(int indent = 0) const override;
@@ -85,11 +89,12 @@ public:
 /// Column selection / expression node.
 class AstProjectNode : public AstNode {
 public:
-	vector<string> expressions; ///< Projected expressions or column references.
+	vector<string> expressions;      ///< Projected expressions / column references (child CTE names).
+	vector<string> cte_column_names; ///< CTE-scoped output names (e.g. "t1_name").
 	size_t table_index;
 
-	AstProjectNode(vector<string> expressions, size_t table_index)
-	    : expressions(std::move(expressions)), table_index(table_index) {
+	AstProjectNode(vector<string> expressions, vector<string> cte_column_names, size_t table_index)
+	    : expressions(std::move(expressions)), cte_column_names(std::move(cte_column_names)), table_index(table_index) {
 	}
 
 	string ToString(int indent = 0) const override;
@@ -101,11 +106,14 @@ public:
 /// GROUP BY + aggregate functions node.
 class AstAggregateNode : public AstNode {
 public:
-	vector<string> group_by_columns;      ///< GROUP BY column references.
-	vector<string> aggregate_expressions; ///< Aggregate expressions (e.g. "sum(amount)").
+	vector<string> group_by_columns;      ///< GROUP BY column references (child CTE names).
+	vector<string> aggregate_expressions; ///< Aggregate function strings (e.g. "sum(t0_amount)").
+	vector<string> cte_column_names;      ///< CTE-scoped output names (e.g. "t2_region", "t3_aggregate_0").
 
-	AstAggregateNode(vector<string> group_by_columns, vector<string> aggregate_expressions)
-	    : group_by_columns(std::move(group_by_columns)), aggregate_expressions(std::move(aggregate_expressions)) {
+	AstAggregateNode(vector<string> group_by_columns, vector<string> aggregate_expressions,
+	                 vector<string> cte_column_names)
+	    : group_by_columns(std::move(group_by_columns)), aggregate_expressions(std::move(aggregate_expressions)),
+	      cte_column_names(std::move(cte_column_names)) {
 	}
 
 	string ToString(int indent = 0) const override;
@@ -118,10 +126,11 @@ public:
 class AstJoinNode : public AstNode {
 public:
 	JoinType join_type;
-	vector<string> conditions; ///< Join conditions (e.g. "a.id = b.id").
+	vector<string> conditions;       ///< Join conditions as strings (e.g. "(t0_id = t1_user_id)").
+	vector<string> cte_column_names; ///< All output column names (left ++ right).
 
-	AstJoinNode(JoinType join_type, vector<string> conditions)
-	    : join_type(join_type), conditions(std::move(conditions)) {
+	AstJoinNode(JoinType join_type, vector<string> conditions, vector<string> cte_column_names)
+	    : join_type(join_type), conditions(std::move(conditions)), cte_column_names(std::move(cte_column_names)) {
 	}
 
 	string ToString(int indent = 0) const override;
@@ -134,8 +143,10 @@ public:
 class AstUnionNode : public AstNode {
 public:
 	bool is_union_all;
+	vector<string> cte_column_names; ///< Output column names derived from the left-hand side.
 
-	explicit AstUnionNode(bool is_union_all) : is_union_all(is_union_all) {
+	AstUnionNode(bool is_union_all, vector<string> cte_column_names)
+	    : is_union_all(is_union_all), cte_column_names(std::move(cte_column_names)) {
 	}
 
 	string ToString(int indent = 0) const override;

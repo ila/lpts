@@ -10,6 +10,10 @@ string AstNode::Indent(int indent) {
 	return string(static_cast<size_t>(indent), ' ');
 }
 
+InsertionOrderPreservingMap<string> AstNode::GetExtraInfo() const {
+	return InsertionOrderPreservingMap<string>();
+}
+
 //------------------------------------------------------------------------------
 // AstGetNode
 //------------------------------------------------------------------------------
@@ -42,6 +46,32 @@ string AstGetNode::ToString(int indent) const {
 	return result;
 }
 
+InsertionOrderPreservingMap<string> AstGetNode::GetExtraInfo() const {
+	InsertionOrderPreservingMap<string> info;
+	info.insert("Table", catalog + "." + schema + "." + table_name);
+	string cols = "[";
+	for (size_t i = 0; i < column_names.size(); i++) {
+		if (i > 0) {
+			cols += ", ";
+		}
+		cols += column_names[i];
+	}
+	cols += "]";
+	info.insert("Columns", std::move(cols));
+	if (!table_filters.empty()) {
+		string filters = "[";
+		for (size_t i = 0; i < table_filters.size(); i++) {
+			if (i > 0) {
+				filters += ", ";
+			}
+			filters += table_filters[i];
+		}
+		filters += "]";
+		info.insert("Filters", std::move(filters));
+	}
+	return info;
+}
+
 //------------------------------------------------------------------------------
 // AstFilterNode
 //------------------------------------------------------------------------------
@@ -56,6 +86,14 @@ string AstFilterNode::ToString(int indent) const {
 		result += "\n" + child->ToString(indent + 2);
 	}
 	return result;
+}
+
+InsertionOrderPreservingMap<string> AstFilterNode::GetExtraInfo() const {
+	InsertionOrderPreservingMap<string> info;
+	for (size_t i = 0; i < conditions.size(); i++) {
+		info.insert("Condition [" + std::to_string(i) + "]", conditions[i]);
+	}
+	return info;
 }
 
 //------------------------------------------------------------------------------
@@ -73,6 +111,14 @@ string AstProjectNode::ToString(int indent) const {
 		result += "\n" + child->ToString(indent + 2);
 	}
 	return result;
+}
+
+InsertionOrderPreservingMap<string> AstProjectNode::GetExtraInfo() const {
+	InsertionOrderPreservingMap<string> info;
+	for (size_t i = 0; i < expressions.size(); i++) {
+		info.insert(cte_column_names[i], expressions[i]);
+	}
+	return info;
 }
 
 //------------------------------------------------------------------------------
@@ -103,6 +149,25 @@ string AstAggregateNode::ToString(int indent) const {
 	return result;
 }
 
+InsertionOrderPreservingMap<string> AstAggregateNode::GetExtraInfo() const {
+	InsertionOrderPreservingMap<string> info;
+	if (!group_by_columns.empty()) {
+		string groups = "[";
+		for (size_t i = 0; i < group_by_columns.size(); i++) {
+			if (i > 0) {
+				groups += ", ";
+			}
+			groups += group_by_columns[i];
+		}
+		groups += "]";
+		info.insert("Group By", std::move(groups));
+	}
+	for (size_t i = 0; i < aggregate_expressions.size(); i++) {
+		info.insert(cte_column_names[group_by_columns.size() + i], aggregate_expressions[i]);
+	}
+	return info;
+}
+
 //------------------------------------------------------------------------------
 // AstJoinNode
 //------------------------------------------------------------------------------
@@ -119,6 +184,15 @@ string AstJoinNode::ToString(int indent) const {
 	return result;
 }
 
+InsertionOrderPreservingMap<string> AstJoinNode::GetExtraInfo() const {
+	InsertionOrderPreservingMap<string> info;
+	info.insert("Type", JoinTypeToString(join_type));
+	for (size_t i = 0; i < conditions.size(); i++) {
+		info.insert("On [" + std::to_string(i) + "]", conditions[i]);
+	}
+	return info;
+}
+
 //------------------------------------------------------------------------------
 // AstUnionNode
 //------------------------------------------------------------------------------
@@ -130,6 +204,21 @@ string AstUnionNode::ToString(int indent) const {
 		result += "\n" + child->ToString(indent + 2);
 	}
 	return result;
+}
+
+InsertionOrderPreservingMap<string> AstUnionNode::GetExtraInfo() const {
+	InsertionOrderPreservingMap<string> info;
+	info.insert("Type", is_union_all ? "UNION ALL" : "UNION");
+	string cols = "[";
+	for (size_t i = 0; i < cte_column_names.size(); i++) {
+		if (i > 0) {
+			cols += ", ";
+		}
+		cols += cte_column_names[i];
+	}
+	cols += "]";
+	info.insert("Columns", std::move(cols));
+	return info;
 }
 
 //------------------------------------------------------------------------------
@@ -144,6 +233,13 @@ string AstInsertNode::ToString(int indent) const {
 		result += "\n" + child->ToString(indent + 2);
 	}
 	return result;
+}
+
+InsertionOrderPreservingMap<string> AstInsertNode::GetExtraInfo() const {
+	InsertionOrderPreservingMap<string> info;
+	info.insert("Target", target_table);
+	info.insert("On Conflict", EnumUtil::ToString(action_type));
+	return info;
 }
 
 //------------------------------------------------------------------------------

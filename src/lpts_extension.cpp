@@ -2,12 +2,15 @@
 
 #include "lpts_extension.hpp"
 #include "logical_plan_to_sql.hpp"
+#include "lpts_ast.hpp"
+#include "lpts_ast_renderer.hpp"
 #include "lpts_pipeline.hpp"
 #include "lpts_helpers.hpp"
 #include "lpts_debug.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/function/pragma_function.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -126,6 +129,70 @@ static void LptsTableFunc(ClientContext &context, TableFunctionInput &data_p, Da
 }
 
 //------------------------------------------------------------------------------
+// PRAGMA print_ast('query') — shows the AST tree for a SQL query.
+//------------------------------------------------------------------------------
+
+static void PrintAstPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
+	auto query = StringValue::Get(parameters.values[0]);
+
+	Parser parser;
+	parser.ParseQuery(query);
+	if (parser.statements.empty()) {
+		throw ParserException("Failed to parse query: %s", query);
+	}
+
+	Planner planner(context);
+	planner.CreatePlan(parser.statements[0]->Copy());
+
+	auto ast = LogicalPlanToAst(context, planner.plan);
+	string rendered = RenderAstTree(*ast);
+	Printer::RawPrint(OutputStream::STREAM_STDOUT, rendered);
+}
+
+//------------------------------------------------------------------------------
+// Table function print_ast_query('query') — for programmatic use.
+//------------------------------------------------------------------------------
+
+struct PrintAstBindData : public TableFunctionData {
+	string rendered;
+};
+
+static unique_ptr<FunctionData> PrintAstTableBind(ClientContext &context, TableFunctionBindInput &input,
+                                                  vector<LogicalType> &return_types, vector<string> &names) {
+	auto query = StringValue::Get(input.inputs[0]);
+
+	Parser parser;
+	parser.ParseQuery(query);
+	if (parser.statements.empty()) {
+		throw ParserException("Failed to parse query: %s", query);
+	}
+
+	Planner planner(context);
+	planner.CreatePlan(parser.statements[0]->Copy());
+
+	auto ast = LogicalPlanToAst(context, planner.plan);
+
+	auto result = make_uniq<PrintAstBindData>();
+	result->rendered = PrintAst(*ast);
+
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("ast");
+
+	return std::move(result);
+}
+
+static void PrintAstTableFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &state = dynamic_cast<LptsGlobalState &>(*data_p.global_state);
+	if (state.done) {
+		return;
+	}
+	auto &bind_data = dynamic_cast<const PrintAstBindData &>(*data_p.bind_data);
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value(bind_data.rendered));
+	state.done = true;
+}
+
+//------------------------------------------------------------------------------
 // Extension loading
 //------------------------------------------------------------------------------
 
@@ -144,6 +211,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register table function lpts_query('query') for SELECT * FROM lpts_query(...)
 	TableFunction table_func("lpts_query", {LogicalType::VARCHAR}, LptsTableFunc, LptsTableBind, LptsTableInit);
 	loader.RegisterFunction(table_func);
+
+	// Register PRAGMA print_ast('query')
+	auto print_ast_pragma = PragmaFunction::PragmaCall("print_ast", PrintAstPragmaFunction, {LogicalType::VARCHAR});
+	loader.RegisterFunction(print_ast_pragma);
+
+	// Register table function print_ast_query('query')
+	TableFunction print_ast_table("print_ast_query", {LogicalType::VARCHAR}, PrintAstTableFunc, PrintAstTableBind,
+	                              LptsTableInit);
+	loader.RegisterFunction(print_ast_table);
 }
 
 void LptsExtension::Load(ExtensionLoader &loader) {

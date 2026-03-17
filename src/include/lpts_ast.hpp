@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "duckdb/common/insertion_order_preserving_map.hpp"
 
 namespace duckdb {
 
@@ -43,6 +44,9 @@ public:
 	/// Return the type name of this node (e.g. "Get", "Filter").
 	virtual string NodeType() const = 0;
 
+	/// Return key-value pairs for box-rendered extra info (used by RenderAstTree).
+	virtual InsertionOrderPreservingMap<string> GetExtraInfo() const;
+
 protected:
 	/// Helper: produce an indentation string of `indent` spaces.
 	static string Indent(int indent);
@@ -70,6 +74,7 @@ public:
 	string NodeType() const override {
 		return "Get";
 	}
+	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
 /// WHERE clause node.
@@ -84,6 +89,7 @@ public:
 	string NodeType() const override {
 		return "Filter";
 	}
+	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
 /// Column selection / expression node.
@@ -101,6 +107,7 @@ public:
 	string NodeType() const override {
 		return "Project";
 	}
+	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
 /// GROUP BY + aggregate functions node.
@@ -120,6 +127,7 @@ public:
 	string NodeType() const override {
 		return "Aggregate";
 	}
+	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
 /// JOIN node.
@@ -137,6 +145,7 @@ public:
 	string NodeType() const override {
 		return "Join";
 	}
+	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
 /// UNION / UNION ALL node.
@@ -153,6 +162,7 @@ public:
 	string NodeType() const override {
 		return "Union";
 	}
+	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
 /// INSERT INTO node.
@@ -169,6 +179,7 @@ public:
 	string NodeType() const override {
 		return "Insert";
 	}
+	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
 /// Pretty-print the full AST tree starting from the given root node.

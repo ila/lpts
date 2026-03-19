@@ -13,11 +13,21 @@ SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT count(*) FROM sales');
 ----
 WITH scan_0 AS (SELECT * FROM memory.main.sales),  aggregate_1 (t3_aggregate_0) AS (SELECT count_star() FROM scan_0),  projection_2 (t1_aggregate_0) AS (SELECT t3_aggregate_0 FROM aggregate_1) SELECT t1_aggregate_0 AS aggregate_0 FROM projection_2;
 
+query I
+PRAGMA lpts_check('SELECT count(*) FROM sales');
+----
+true
+
 # Group by with count
 query I
 SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT product, count(*) FROM sales GROUP BY product');
 ----
 WITH scan_0 (t0_product) AS (SELECT product FROM memory.main.sales),  aggregate_1 (t2_product, t3_aggregate_0) AS (SELECT t0_product, count_star() FROM scan_0 GROUP BY t0_product),  projection_2 (t1_product, t1_aggregate_0) AS (SELECT t2_product, t3_aggregate_0 FROM aggregate_1) SELECT t1_product AS product, t1_aggregate_0 AS aggregate_0 FROM projection_2;
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM sales GROUP BY product');
+----
+true
 
 # Group by with sum
 query I
@@ -25,8 +35,18 @@ SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT region, sum(amount) FR
 ----
 WITH scan_0 (t0_region, t0_amount) AS (SELECT region, amount FROM memory.main.sales),  aggregate_1 (t2_region, t3_aggregate_0) AS (SELECT t0_region, sum(t0_amount) FROM scan_0 GROUP BY t0_region),  projection_2 (t1_region, t1_aggregate_0) AS (SELECT t2_region, t3_aggregate_0 FROM aggregate_1) SELECT t1_region AS region, t1_aggregate_0 AS aggregate_0 FROM projection_2;
 
+query I
+PRAGMA lpts_check('SELECT region, sum(amount) FROM sales GROUP BY region');
+----
+true
+
 # Multiple group by columns
 query I
 SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT product, region, count(*) FROM sales GROUP BY product, region');
 ----
 WITH scan_0 (t0_product, t0_region) AS (SELECT product, region FROM memory.main.sales),  aggregate_1 (t2_product, t2_region, t3_aggregate_0) AS (SELECT t0_product, t0_region, count_star() FROM scan_0 GROUP BY t0_product, t0_region),  projection_2 (t1_product, t1_region, t1_aggregate_0) AS (SELECT t2_product, t2_region, t3_aggregate_0 FROM aggregate_1) SELECT t1_product AS product, t1_region AS region, t1_aggregate_0 AS aggregate_0 FROM projection_2;
+
+query I
+PRAGMA lpts_check('SELECT product, region, count(*) FROM sales GROUP BY product, region');
+----
+true

@@ -13,14 +13,29 @@ SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT grp, list_transform(va
 ----
 WITH scan_0 (t0_grp, t0_val) AS (SELECT grp, val FROM memory.main.items),  projection_1 (t1_grp, t1_scalar_1) AS (SELECT t0_grp, list_transform(t0_val, lambda x: (x + CAST(1.0 AS FLOAT))) FROM scan_0) SELECT t1_grp AS grp, t1_scalar_1 AS scalar_1 FROM projection_1;
 
+query I
+PRAGMA lpts_check('SELECT grp, list_transform(val, lambda x: x + 1.0) FROM items');
+----
+true
+
 # list_filter with lambda (comparison in body)
 query I
 SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT grp, list_filter(val, lambda x: x > 5.0) FROM items');
 ----
 WITH scan_0 (t0_grp, t0_val) AS (SELECT grp, val FROM memory.main.items),  projection_1 (t1_grp, t1_scalar_1) AS (SELECT t0_grp, list_filter(t0_val, lambda x: (x) > (CAST(5.0 AS FLOAT))) FROM scan_0) SELECT t1_grp AS grp, t1_scalar_1 AS scalar_1 FROM projection_1;
 
+query I
+PRAGMA lpts_check('SELECT grp, list_filter(val, lambda x: x > 5.0) FROM items');
+----
+true
+
 # list_reduce with two-param lambda and nested list_transform lambda
 query I
 SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT grp, list_reduce(list(val), lambda a, b: list_transform(list_zip(a, b), lambda x: x[1] + x[2])) AS total FROM items GROUP BY grp');
 ----
 WITH scan_0 (t0_grp, t0_val) AS (SELECT grp, val FROM memory.main.items),  aggregate_1 (t2_grp, t3_aggregate_0) AS (SELECT t0_grp, list(t0_val) FROM scan_0 GROUP BY t0_grp),  projection_2 (t1_grp, t1_total) AS (SELECT t2_grp, list_reduce(t3_aggregate_0, lambda a, b: list_transform(list_zip(a, b), lambda x: (array_extract(x, CAST(1 AS BIGINT)) + array_extract(x, CAST(2 AS BIGINT))))) FROM aggregate_1) SELECT t1_grp AS grp, t1_total AS total FROM projection_2;
+
+query I
+PRAGMA lpts_check('SELECT grp, list_reduce(list(val), lambda a, b: list_transform(list_zip(a, b), lambda x: x[1] + x[2])) AS total FROM items GROUP BY grp');
+----
+true

@@ -154,6 +154,50 @@ static string LptsExecPragmaFunction(ClientContext &context, const FunctionParam
 }
 
 //------------------------------------------------------------------------------
+// PRAGMA lpts_check('query') — round-trip correctness check.
+//
+// Runs the original query and the LPTS-generated query, then compares results
+// using EXCEPT ALL in both directions. Returns a single boolean column "match".
+//------------------------------------------------------------------------------
+
+static string LptsCheckPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
+	auto query = StringValue::Get(parameters.values[0]);
+
+	Parser parser;
+	parser.ParseQuery(query);
+	if (parser.statements.empty()) {
+		throw ParserException("Failed to parse query: %s", query);
+	}
+
+	Planner planner(context);
+	planner.CreatePlan(parser.statements[0]->Copy());
+
+	auto ast = LogicalPlanToAst(context, planner.plan);
+	SqlDialect dialect = ReadDialect(context);
+	auto cte_list = AstToCteList(*ast, dialect);
+	string lpts_sql = cte_list->ToQuery(true);
+
+	// Strip trailing semicolons for use as subqueries
+	string orig = query;
+	while (!orig.empty() && (orig.back() == ';' || orig.back() == ' ' || orig.back() == '\n')) {
+		orig.pop_back();
+	}
+	while (!lpts_sql.empty() && (lpts_sql.back() == ';' || lpts_sql.back() == ' ' || lpts_sql.back() == '\n')) {
+		lpts_sql.pop_back();
+	}
+
+	string escaped_lpts = EscapeSingleQuotes(lpts_sql);
+
+	// Compare: no rows in (A EXCEPT ALL B) AND no rows in (B EXCEPT ALL A)
+	return "SELECT "
+	       "(SELECT count(*) FROM ((" +
+	       orig + ") EXCEPT ALL (" + lpts_sql +
+	       "))) = 0 AND "
+	       "(SELECT count(*) FROM ((" +
+	       lpts_sql + ") EXCEPT ALL (" + orig + "))) = 0 AS match;";
+}
+
+//------------------------------------------------------------------------------
 // PRAGMA print_ast('query') — shows the AST tree for a SQL query.
 //------------------------------------------------------------------------------
 
@@ -240,6 +284,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register PRAGMA lpts_exec('query') — round-trip: plan → SQL → execute
 	auto lpts_exec_pragma = PragmaFunction::PragmaCall("lpts_exec", LptsExecPragmaFunction, {LogicalType::VARCHAR});
 	loader.RegisterFunction(lpts_exec_pragma);
+
+	// Register PRAGMA lpts_check('query') — round-trip correctness check
+	auto lpts_check_pragma = PragmaFunction::PragmaCall("lpts_check", LptsCheckPragmaFunction, {LogicalType::VARCHAR});
+	loader.RegisterFunction(lpts_check_pragma);
 
 	// Register PRAGMA print_ast('query')
 	auto print_ast_pragma = PragmaFunction::PragmaCall("print_ast", PrintAstPragmaFunction, {LogicalType::VARCHAR});

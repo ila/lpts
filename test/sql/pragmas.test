@@ -1,0 +1,83 @@
+# name: test/sql/pragmas.test
+# description: test lpts pragmas (lpts_exec, lpts_check)
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE t (id INT, val INT);
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);
+
+# --- lpts_exec: round-trip produces correct results ---
+
+query II
+PRAGMA lpts_exec('SELECT * FROM t');
+----
+1	10
+2	20
+3	30
+
+query II
+PRAGMA lpts_exec('SELECT id, sum(val) FROM t GROUP BY id');
+----
+1	10
+2	20
+3	30
+
+# --- lpts_check: matching queries return true ---
+
+query I
+PRAGMA lpts_check('SELECT * FROM t');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT id, sum(val) FROM t GROUP BY id');
+----
+true
+
+# --- lpts_check with data: non-empty tables ---
+
+statement ok
+CREATE TABLE a (x INT);
+
+statement ok
+CREATE TABLE b (x INT);
+
+statement ok
+INSERT INTO a VALUES (1), (2), (3);
+
+statement ok
+INSERT INTO b VALUES (2), (3), (4);
+
+query I
+PRAGMA lpts_check('SELECT * FROM a');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT a.x FROM a JOIN b ON a.x = b.x');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT x FROM a UNION ALL SELECT x FROM b');
+----
+true
+
+# --- lpts_check: detect mismatch via tampered table ---
+# Insert a row, check, then delete it — the check itself should still be true
+# since both sides see the same data at query time.
+
+statement ok
+INSERT INTO a VALUES (99);
+
+query I
+PRAGMA lpts_check('SELECT * FROM a');
+----
+true
+
+statement ok
+DELETE FROM a WHERE x = 99;

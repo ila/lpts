@@ -27,6 +27,12 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_lambda_expression.hpp"
+#include "duckdb/planner/expression/bound_lambdaref_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/function/lambda_functions.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -78,6 +84,34 @@ private:
 	std::map<MappableColumnBinding, unique_ptr<ColStruct>> column_map;
 
 	//--------------------------------------------------------------------------
+	// CollectLambdaParamNames
+	//
+	// Walk a lambda body to find BoundReferenceExpression nodes (the post-binding
+	// form of lambda parameters). Stops at nested lambda functions.
+	//--------------------------------------------------------------------------
+	static void CollectLambdaParamNames(const Expression &expr, std::map<idx_t, string> &names) {
+		if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+			auto &ref = expr.Cast<BoundReferenceExpression>();
+			if (names.find(ref.index) == names.end()) {
+				names[ref.index] = ref.alias.empty() ? ("p" + to_string(ref.index)) : ref.alias;
+			}
+			return;
+		}
+		// For nested lambda functions, only recurse into children (not bind_info)
+		if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+			auto &func = expr.Cast<BoundFunctionExpression>();
+			if (func.function.HasBindLambdaCallback()) {
+				for (auto &child : func.children) {
+					CollectLambdaParamNames(*child, names);
+				}
+				return;
+			}
+		}
+		ExpressionIterator::EnumerateChildren(const_cast<Expression &>(expr),
+		                                      [&](Expression &child) { CollectLambdaParamNames(child, names); });
+	}
+
+	//--------------------------------------------------------------------------
 	// ExpressionToAliasedString
 	//
 	// Converts a bound DuckDB expression into a SQL string, replacing internal
@@ -125,6 +159,80 @@ private:
 			expr_str << " (";
 			expr_str << ExpressionToAliasedString(conj.children[1]);
 			expr_str << ")";
+			break;
+		}
+		case ExpressionClass::BOUND_FUNCTION: {
+			const BoundFunctionExpression &func_expr = expression->Cast<BoundFunctionExpression>();
+			// For lambda functions, only serialize non-lambda, non-capture children
+			idx_t child_count = func_expr.children.size();
+			if (func_expr.function.HasBindLambdaCallback()) {
+				child_count = 0;
+				for (auto &arg_type : func_expr.function.arguments) {
+					if (arg_type.id() != LogicalTypeId::LAMBDA) {
+						child_count++;
+					}
+				}
+				if (child_count > func_expr.children.size()) {
+					child_count = func_expr.children.size();
+				}
+			}
+			// Operators: use infix notation (e.g. "a + b")
+			if (func_expr.is_operator && child_count == 2) {
+				expr_str << "(";
+				expr_str << ExpressionToAliasedString(func_expr.children[0]);
+				expr_str << " " << func_expr.function.name << " ";
+				expr_str << ExpressionToAliasedString(func_expr.children[1]);
+				expr_str << ")";
+			} else {
+				expr_str << func_expr.function.name << "(";
+				for (idx_t i = 0; i < child_count; i++) {
+					if (i > 0) {
+						expr_str << ", ";
+					}
+					expr_str << ExpressionToAliasedString(func_expr.children[i]);
+				}
+				// Lambda function: serialize the lambda expression from bind_info
+				if (func_expr.function.HasBindLambdaCallback() && func_expr.bind_info) {
+					auto &bind_data = func_expr.bind_info->Cast<ListLambdaBindData>();
+					if (bind_data.lambda_expr) {
+						if (child_count > 0) {
+							expr_str << ", ";
+						}
+						std::map<idx_t, string> param_map;
+						CollectLambdaParamNames(*bind_data.lambda_expr, param_map);
+						idx_t param_count = param_map.empty() ? 0 : param_map.rbegin()->first + 1;
+						vector<string> param_names(param_count);
+						for (auto &entry : param_map) {
+							if (entry.first < param_count) {
+								param_names[param_count - 1 - entry.first] = entry.second;
+							}
+						}
+						for (idx_t i = 0; i < param_count; i++) {
+							if (param_names[i].empty()) {
+								param_names[i] = "p" + to_string(i);
+							}
+						}
+						expr_str << "lambda ";
+						for (idx_t i = 0; i < param_count; i++) {
+							if (i > 0) {
+								expr_str << ", ";
+							}
+							expr_str << param_names[i];
+						}
+						expr_str << ": ";
+						expr_str << ExpressionToAliasedString(bind_data.lambda_expr);
+					}
+				}
+				expr_str << ")";
+			}
+			break;
+		}
+		case ExpressionClass::BOUND_REF: {
+			expr_str << expression->ToString();
+			break;
+		}
+		case ExpressionClass::BOUND_LAMBDA_REF: {
+			expr_str << expression->ToString();
 			break;
 		}
 		default:

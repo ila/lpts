@@ -22,6 +22,7 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -122,8 +123,13 @@ string GetNode::ToQuery() {
 		// Fully-qualified: catalog.schema.table (DuckDB dialect)
 		get_str << catalog << "." << schema << "." << table_name;
 	} else {
-		// Unqualified: table only (Postgres dialect)
+		// Unqualified: table function or simple table name
 		get_str << table_name;
+		// For table functions (name contains parentheses), add column aliases
+		// so that renamed columns (e.g. range(1,10) t(i)) resolve correctly.
+		if (table_name.find('(') != string::npos && !column_names.empty()) {
+			get_str << " _tf(" << VecToSeparatedList(column_names) << ")";
+		}
 	}
 	if (!table_filters.empty()) {
 		get_str << " WHERE ";
@@ -404,6 +410,19 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 		expr_str << expression->ToString();
 		break;
 	}
+	case (ExpressionClass::BOUND_CASE): {
+		const BoundCaseExpression &case_expr = expression->Cast<BoundCaseExpression>();
+		expr_str << "CASE";
+		for (auto &check : case_expr.case_checks) {
+			expr_str << " WHEN " << ExpressionToAliasedString(check.when_expr);
+			expr_str << " THEN " << ExpressionToAliasedString(check.then_expr);
+		}
+		if (case_expr.else_expr) {
+			expr_str << " ELSE " << ExpressionToAliasedString(case_expr.else_expr);
+		}
+		expr_str << " END";
+		break;
+	}
 	default: {
 		throw NotImplementedException("Unsupported expression for ExpressionToAliasedString: %s",
 		                              ExpressionTypeToString(expression->type));
@@ -437,7 +456,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 
 	switch (subplan->type) {
 	case LogicalOperatorType::LOGICAL_GET: {
-		// GET = table scan. Reads columns from a physical table.
+		// GET = table scan. Reads columns from a physical table or table function.
 		// We register each output column in column_map so that parent operators
 		// (filter, projection, etc.) can resolve column references.
 		const LogicalGet &plan_as_get = subplan->Cast<LogicalGet>();
@@ -446,9 +465,26 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		auto catalog_entry = plan_as_get.GetTable();
 		LPTS_DEBUG_PRINT("[LPTS] GET: catalog_entry=" + string(catalog_entry ? "valid" : "null"));
 		size_t table_index = plan_as_get.table_index;
-		string table_name = catalog_entry.get()->name;
-		string catalog_name = plan_as_get.GetTable()->schema.ParentCatalog().GetName();
-		string schema_name = catalog_entry->schema.name;
+		string table_name;
+		string catalog_name;
+		string schema_name;
+		if (catalog_entry) {
+			table_name = catalog_entry.get()->name;
+			catalog_name = plan_as_get.GetTable()->schema.ParentCatalog().GetName();
+			schema_name = catalog_entry->schema.name;
+		} else {
+			// Table function (e.g. range(), read_csv(), generate_series())
+			std::ostringstream func_str;
+			func_str << plan_as_get.function.name << "(";
+			for (size_t i = 0; i < plan_as_get.parameters.size(); i++) {
+				if (i > 0) {
+					func_str << ", ";
+				}
+				func_str << plan_as_get.parameters[i].ToSQLString();
+			}
+			func_str << ")";
+			table_name = func_str.str();
+		}
 		LPTS_DEBUG_PRINT("[LPTS] GET: " + catalog_name + "." + schema_name + "." + table_name);
 		vector<string> column_names;
 		vector<string> filters;

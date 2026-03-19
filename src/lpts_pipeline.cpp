@@ -25,6 +25,7 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -233,6 +234,19 @@ private:
 		}
 		case ExpressionClass::BOUND_LAMBDA_REF: {
 			expr_str << expression->ToString();
+			break;
+		}
+		case ExpressionClass::BOUND_CASE: {
+			const BoundCaseExpression &case_expr = expression->Cast<BoundCaseExpression>();
+			expr_str << "CASE";
+			for (auto &check : case_expr.case_checks) {
+				expr_str << " WHEN " << ExpressionToAliasedString(check.when_expr);
+				expr_str << " THEN " << ExpressionToAliasedString(check.then_expr);
+			}
+			if (case_expr.else_expr) {
+				expr_str << " ELSE " << ExpressionToAliasedString(case_expr.else_expr);
+			}
+			expr_str << " END";
 			break;
 		}
 		default:

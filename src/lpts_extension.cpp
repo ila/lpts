@@ -129,6 +129,31 @@ static void LptsTableFunc(ClientContext &context, TableFunctionInput &data_p, Da
 }
 
 //------------------------------------------------------------------------------
+// PRAGMA lpts_exec('query') — converts a SQL query via LPTS then executes it.
+//
+// Runs the query through the full LPTS pipeline (plan → AST → SQL) and then
+// executes the generated SQL, returning its results directly.
+//------------------------------------------------------------------------------
+
+static string LptsExecPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
+	auto query = StringValue::Get(parameters.values[0]);
+
+	Parser parser;
+	parser.ParseQuery(query);
+	if (parser.statements.empty()) {
+		throw ParserException("Failed to parse query: %s", query);
+	}
+
+	Planner planner(context);
+	planner.CreatePlan(parser.statements[0]->Copy());
+
+	auto ast = LogicalPlanToAst(context, planner.plan);
+	SqlDialect dialect = ReadDialect(context);
+	auto cte_list = AstToCteList(*ast, dialect);
+	return cte_list->ToQuery(true);
+}
+
+//------------------------------------------------------------------------------
 // PRAGMA print_ast('query') — shows the AST tree for a SQL query.
 //------------------------------------------------------------------------------
 
@@ -211,6 +236,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register table function lpts_query('query') for SELECT * FROM lpts_query(...)
 	TableFunction table_func("lpts_query", {LogicalType::VARCHAR}, LptsTableFunc, LptsTableBind, LptsTableInit);
 	loader.RegisterFunction(table_func);
+
+	// Register PRAGMA lpts_exec('query') — round-trip: plan → SQL → execute
+	auto lpts_exec_pragma = PragmaFunction::PragmaCall("lpts_exec", LptsExecPragmaFunction, {LogicalType::VARCHAR});
+	loader.RegisterFunction(lpts_exec_pragma);
 
 	// Register PRAGMA print_ast('query')
 	auto print_ast_pragma = PragmaFunction::PragmaCall("print_ast", PrintAstPragmaFunction, {LogicalType::VARCHAR});

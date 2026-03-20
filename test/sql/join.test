@@ -14,7 +14,7 @@ CREATE TABLE orders (id INTEGER, user_id INTEGER, amount DECIMAL);
 query I
 SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
 ----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT * FROM scan_0 INNER JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
+WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT t0_id, t0_name, t1_user_id, t1_amount FROM scan_0 INNER JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
 
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
@@ -25,7 +25,7 @@ true
 query I
 SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT u.name, o.amount FROM users u LEFT JOIN orders o ON u.id = o.user_id');
 ----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT * FROM scan_0 LEFT JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
+WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT t0_id, t0_name, t1_user_id, t1_amount FROM scan_0 LEFT JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
 
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u LEFT JOIN orders o ON u.id = o.user_id');
@@ -36,7 +36,7 @@ true
 query I
 SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT u.name, o.amount FROM users u RIGHT JOIN orders o ON u.id = o.user_id');
 ----
-WITH scan_0 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  scan_1 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  join_2 (t1_user_id, t1_amount, t0_id, t0_name) AS (SELECT * FROM scan_0 LEFT JOIN scan_1 ON (t1_user_id = t0_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
+WITH scan_0 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  scan_1 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  join_2 (t1_user_id, t1_amount, t0_id, t0_name) AS (SELECT t1_user_id, t1_amount, t0_id, t0_name FROM scan_0 LEFT JOIN scan_1 ON (t1_user_id = t0_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
 
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u RIGHT JOIN orders o ON u.id = o.user_id');
@@ -47,10 +47,22 @@ true
 query I
 SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT u.name, o.amount FROM users u FULL OUTER JOIN orders o ON u.id = o.user_id');
 ----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT * FROM scan_0 FULL JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
+WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT t0_id, t0_name, t1_user_id, t1_amount FROM scan_0 FULL JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
 
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u FULL OUTER JOIN orders o ON u.id = o.user_id');
+----
+true
+
+# Join with computed expressions (verifies column alignment with same-name join keys)
+statement ok
+CREATE TABLE staff (id INTEGER, dept VARCHAR, salary INTEGER);
+
+statement ok
+CREATE TABLE bonus (dept VARCHAR, amount INTEGER);
+
+query I
+PRAGMA lpts_check('SELECT s.id, s.salary + b.amount FROM staff s JOIN bonus b ON s.dept = b.dept');
 ----
 true
 

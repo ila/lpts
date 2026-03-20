@@ -76,7 +76,16 @@ private:
 
 		/// Produce "t{table_index}_{alias || column_name}".
 		string ToUniqueColumnName() const {
-			return "t" + std::to_string(table_index) + "_" + (alias.empty() ? column_name : alias);
+			string base = alias.empty() ? column_name : alias;
+			string result = "t" + std::to_string(table_index) + "_";
+			for (char c : base) {
+				if (c == '(' || c == ')' || c == ' ' || c == ',' || c == '*') {
+					result += '_';
+				} else {
+					result += c;
+				}
+			}
+			return result;
 		}
 	};
 

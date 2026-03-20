@@ -63,7 +63,12 @@ string FinalReadNode::ToQuery() {
 	// Assign the final column names to the CTE column names. Format: "cte_col AS final_col".
 	merged_list.reserve(col_count);
 	for (size_t i = 0; i < final_column_list.size(); ++i) {
-		merged_list.emplace_back(child_cte_column_list[i] + " AS " + final_column_list[i]);
+		// Quote final column names that contain special characters (e.g. "sum(salary)")
+		string final_name = final_column_list[i];
+		if (final_name.find_first_of("()*, ") != string::npos) {
+			final_name = "\"" + final_name + "\"";
+		}
+		merged_list.emplace_back(child_cte_column_list[i] + " AS " + final_name);
 	}
 	std::ostringstream sql_str;
 	sql_str << "SELECT ";
@@ -181,7 +186,9 @@ string AggregateNode::ToQuery() {
 
 string JoinNode::ToQuery() {
 	std::ostringstream join_str;
-	join_str << "SELECT * FROM ";
+	// Use explicit column list instead of SELECT * to avoid including
+	// duplicate join key columns from both sides of the join.
+	join_str << "SELECT " << VecToSeparatedList(cte_column_list) << " FROM ";
 	join_str << left_cte_name;
 	join_str << " ";
 	switch (join_type) {
@@ -189,6 +196,8 @@ string JoinNode::ToQuery() {
 	case JoinType::LEFT:
 	case JoinType::RIGHT:
 	case JoinType::OUTER:
+	case JoinType::SEMI:
+	case JoinType::ANTI:
 		join_str << EnumUtil::ToString(join_type);
 		break;
 	default:
@@ -253,7 +262,17 @@ string CteList::ToQuery(const bool use_newlines) {
 }
 
 string LogicalPlanToSql::ColStruct::ToUniqueColumnName() const {
-	return "t" + std::to_string(table_index) + "_" + (alias.empty() ? column_name : alias);
+	string base = alias.empty() ? column_name : alias;
+	// Sanitize: replace characters that would break SQL identifiers
+	string result = "t" + std::to_string(table_index) + "_";
+	for (char c : base) {
+		if (c == '(' || c == ')' || c == ' ' || c == ',' || c == '*') {
+			result += '_';
+		} else {
+			result += c;
+		}
+	}
+	return result;
 }
 
 //------------------------------------------------------------------------------
@@ -323,6 +342,17 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 	}
 	case (ExpressionClass::BOUND_FUNCTION): {
 		const BoundFunctionExpression &func_expr = expression->Cast<BoundFunctionExpression>();
+		// DuckDB's optimizer may rewrite functions to internal variants.
+		// Map them back to their public SQL equivalents.
+		if (func_expr.function.name.rfind("__internal_", 0) == 0 && !func_expr.children.empty()) {
+			// Internal compress/decompress wrappers — just emit the child
+			expr_str << ExpressionToAliasedString(func_expr.children[0]);
+			break;
+		}
+		string func_name = func_expr.function.name;
+		if (func_name == "sum_no_overflow") {
+			func_name = "sum";
+		}
 		// For lambda functions, only serialize non-lambda, non-capture children
 		idx_t child_count = func_expr.children.size();
 		if (func_expr.function.HasBindLambdaCallback()) {
@@ -340,11 +370,11 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 		if (func_expr.is_operator && child_count == 2) {
 			expr_str << "(";
 			expr_str << ExpressionToAliasedString(func_expr.children[0]);
-			expr_str << " " << func_expr.function.name << " ";
+			expr_str << " " << func_name << " ";
 			expr_str << ExpressionToAliasedString(func_expr.children[1]);
 			expr_str << ")";
 		} else {
-			expr_str << func_expr.function.name << "(";
+			expr_str << func_name << "(";
 			for (idx_t i = 0; i < child_count; i++) {
 				if (i > 0) {
 					expr_str << ", ";
@@ -543,6 +573,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		// For expressions (e.g. "a + b"), we convert them to SQL strings.
 		const LogicalProjection &plan_as_projection = subplan->Cast<LogicalProjection>();
 		const size_t table_index = plan_as_projection.table_index;
+
 		vector<string> column_names;
 		vector<string> cte_column_names;
 		for (size_t i = 0; i < plan_as_projection.expressions.size(); ++i) {
@@ -559,12 +590,9 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 			} else {
 				string expr_str = ExpressionToAliasedString(expression);
 				column_names.emplace_back(expr_str);
-				string scalar_alias;
-				if (expression->HasAlias()) {
-					scalar_alias = expression->GetAlias();
-				} else {
-					scalar_alias = "scalar_" + std::to_string(i);
-				}
+				// Always use index-based alias for CTE columns to avoid duplicates
+				// (DuckDB may assign the same alias to multiple expressions)
+				string scalar_alias = "scalar_" + std::to_string(i);
 				auto new_col_struct = make_uniq<ColStruct>(table_index, expr_str, scalar_alias);
 				cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
 				column_map[new_cb] = std::move(new_col_struct);
@@ -622,7 +650,11 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 				if (expr->type == ExpressionType::BOUND_AGGREGATE) {
 					BoundAggregateExpression &bound_agg = expr->Cast<BoundAggregateExpression>();
 					std::ostringstream agg_str;
-					agg_str << bound_agg.function.name;
+					string agg_name = bound_agg.function.name;
+					if (agg_name == "sum_no_overflow") {
+						agg_name = "sum";
+					}
+					agg_str << agg_name;
 					agg_str << "(";
 					if (bound_agg.IsDistinct()) {
 						agg_str << "DISTINCT ";

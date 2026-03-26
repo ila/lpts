@@ -688,10 +688,18 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		if (lhs_bindings.size() != union_bindings.size()) {
 			throw InternalException("LPTS: Size mismatch between column bindings");
 		}
+		unordered_set<string> seen_names;
 		for (size_t i = 0; i < lhs_bindings.size(); ++i) {
 			const unique_ptr<ColStruct> &lhs_col_struct = column_map.at(lhs_bindings[i]);
-			unique_ptr<ColStruct> new_col_struct =
-			    make_uniq<ColStruct>(table_index, lhs_col_struct->column_name, lhs_col_struct->alias);
+			string col_name = lhs_col_struct->column_name;
+			string alias = lhs_col_struct->alias;
+			// Deduplicate column names to avoid ambiguous references in generated SQL
+			string unique_name = "t" + to_string(table_index) + "_" + col_name;
+			if (seen_names.count(unique_name)) {
+				col_name = col_name + "_" + to_string(i);
+			}
+			seen_names.insert("t" + to_string(table_index) + "_" + col_name);
+			unique_ptr<ColStruct> new_col_struct = make_uniq<ColStruct>(table_index, col_name, alias);
 			cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
 			column_map[union_bindings[i]] = std::move(new_col_struct);
 		}

@@ -1,0 +1,53 @@
+# name: test/sql/union.test
+# description: test lpts with UNION ALL queries
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE users (id INTEGER, name VARCHAR);
+
+statement ok
+CREATE TABLE orders (id INTEGER, user_id INTEGER, amount DECIMAL);
+
+statement ok
+CREATE TABLE staff (id INTEGER, dept VARCHAR, salary INTEGER);
+
+statement ok
+INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');
+
+statement ok
+INSERT INTO orders VALUES (1, 1, 100), (2, 2, 200);
+
+statement ok
+INSERT INTO staff VALUES (1, 'eng', 50000), (2, 'sales', 60000);
+
+# Basic UNION ALL — same table
+query I
+PRAGMA lpts_check('SELECT id, name FROM users UNION ALL SELECT id, name FROM users');
+----
+true
+
+# UNION ALL — different tables
+query I
+PRAGMA lpts_check('SELECT id, name FROM users UNION ALL SELECT id, dept FROM staff');
+----
+true
+
+# UNION ALL with JOIN
+query I
+PRAGMA lpts_check('SELECT u.id, u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id UNION ALL SELECT u.id, u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id');
+----
+true
+
+# UNION ALL with aggregate on top
+query I
+PRAGMA lpts_check('SELECT name, SUM(amount) FROM (SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id UNION ALL SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id) GROUP BY name');
+----
+true
+
+# UNION ALL with filter
+query I
+PRAGMA lpts_check('SELECT id, name FROM users WHERE id > 1 UNION ALL SELECT id, dept FROM staff WHERE salary > 55000');
+----
+true

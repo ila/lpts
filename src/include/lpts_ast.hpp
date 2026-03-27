@@ -100,8 +100,7 @@ public:
 	size_t table_index;
 
 	AstProjectNode(vector<string> expressions, vector<string> cte_column_names, size_t table_index)
-	    : expressions(std::move(expressions)), cte_column_names(std::move(cte_column_names)),
-	      table_index(table_index) {
+	    : expressions(std::move(expressions)), cte_column_names(std::move(cte_column_names)), table_index(table_index) {
 	}
 
 	string ToString(int indent = 0) const override;
@@ -135,7 +134,7 @@ public:
 class AstJoinNode : public AstNode {
 public:
 	JoinType join_type;
-	vector<string> conditions;   ///< Join conditions as strings (e.g. "(t0_id = t1_user_id)").
+	vector<string> conditions;       ///< Join conditions as strings (e.g. "(t0_id = t1_user_id)").
 	vector<string> cte_column_names; ///< All output column names (left ++ right).
 
 	AstJoinNode(JoinType join_type, vector<string> conditions, vector<string> cte_column_names)
@@ -222,8 +221,7 @@ class AstDistinctNode : public AstNode {
 public:
 	vector<string> cte_column_names; ///< passthrough from child.
 
-	explicit AstDistinctNode(vector<string> cte_column_names)
-	    : cte_column_names(std::move(cte_column_names)) {
+	explicit AstDistinctNode(vector<string> cte_column_names) : cte_column_names(std::move(cte_column_names)) {
 	}
 
 	string ToString(int indent = 0) const override;

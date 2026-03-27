@@ -796,8 +796,8 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		for (const ColumnBinding &cb : subplan->GetColumnBindings()) {
 			cte_column_names.push_back(column_map.at(cb)->ToUniqueColumnName());
 		}
-		return make_uniq<OrderNode>(my_index, std::move(cte_column_names),
-		                           cte_nodes[children_indices[0]]->cte_name, std::move(order_items));
+		return make_uniq<OrderNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name,
+		                            std::move(order_items));
 	}
 	case LogicalOperatorType::LOGICAL_LIMIT: {
 		const LogicalLimit &limit_op = subplan->Cast<LogicalLimit>();
@@ -817,17 +817,15 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		for (const ColumnBinding &cb : subplan->GetColumnBindings()) {
 			cte_column_names.push_back(column_map.at(cb)->ToUniqueColumnName());
 		}
-		return make_uniq<LimitNode>(my_index, std::move(cte_column_names),
-		                           cte_nodes[children_indices[0]]->cte_name, std::move(limit_str),
-		                           std::move(offset_str));
+		return make_uniq<LimitNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name,
+		                            std::move(limit_str), std::move(offset_str));
 	}
 	case LogicalOperatorType::LOGICAL_DISTINCT: {
 		vector<string> cte_column_names;
 		for (const ColumnBinding &cb : subplan->GetColumnBindings()) {
 			cte_column_names.push_back(column_map.at(cb)->ToUniqueColumnName());
 		}
-		return make_uniq<DistinctNode>(my_index, std::move(cte_column_names),
-		                              cte_nodes[children_indices[0]]->cte_name);
+		return make_uniq<DistinctNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name);
 	}
 	default: {
 		throw NotImplementedException("This logical operator is not implemented: %s.",

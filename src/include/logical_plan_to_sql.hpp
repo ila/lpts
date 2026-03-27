@@ -272,8 +272,7 @@ class OrderNode : public CteNode {
 	vector<string> order_items; ///< e.g. "t1_age DESC", "t0_name ASC"
 public:
 	~OrderNode() override = default;
-	OrderNode(const size_t index, vector<string> cte_column_names, string _child_cte_name,
-	          vector<string> _order_items)
+	OrderNode(const size_t index, vector<string> cte_column_names, string _child_cte_name, vector<string> _order_items)
 	    : CteNode(index, "order_" + std::to_string(index), std::move(cte_column_names)),
 	      child_cte_name(std::move(_child_cte_name)), order_items(std::move(_order_items)) {
 	}
@@ -299,6 +298,7 @@ public:
 /// DISTINCT node — wraps the child CTE with SELECT DISTINCT.
 class DistinctNode : public CteNode {
 	string child_cte_name;
+
 public:
 	~DistinctNode() override = default;
 	DistinctNode(const size_t index, vector<string> cte_column_names, string _child_cte_name)

@@ -429,13 +429,22 @@ private:
 				string cmp = ExpressionTypeToOperator(cond.comparison);
 				conditions.push_back("(" + lhs + " " + cmp + " " + rhs + ")");
 			}
-			// collect output column names from column_map (already populated by children)
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
 				unique_ptr<ColStruct> &col_struct = column_map.at(MappableColumnBinding(cb));
 				cte_column_names.push_back(col_struct->ToUniqueColumnName());
 			}
 			return make_uniq<AstJoinNode>(join_op.join_type, std::move(conditions), std::move(cte_column_names));
+		}
+
+		case LogicalOperatorType::LOGICAL_CROSS_PRODUCT: {
+			vector<string> cross_condition = {"(TRUE)"};
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				unique_ptr<ColStruct> &col_struct = column_map.at(MappableColumnBinding(cb));
+				cte_column_names.push_back(col_struct->ToUniqueColumnName());
+			}
+			return make_uniq<AstJoinNode>(JoinType::INNER, std::move(cross_condition), std::move(cte_column_names));
 		}
 
 		//----------------------------------------------------------------------

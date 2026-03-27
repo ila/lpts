@@ -775,6 +775,19 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		return make_uniq<JoinNode>(my_index, std::move(cte_column_names), std::move(left_cte_name),
 		                           std::move(right_cte_name), plan_as_join.join_type, std::move(join_conditions));
 	}
+	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT: {
+		// Cross product = unconditional join. Rendered as INNER JOIN ON (TRUE).
+		string left_cte_name = cte_nodes[children_indices[0]]->cte_name;
+		string right_cte_name = cte_nodes[children_indices[1]]->cte_name;
+		vector<string> cte_column_names;
+		for (const ColumnBinding &binding : subplan->GetColumnBindings()) {
+			unique_ptr<ColStruct> &col_struct = column_map.at(binding);
+			cte_column_names.push_back(col_struct->ToUniqueColumnName());
+		}
+		vector<string> cross_condition = {"(TRUE)"};
+		return make_uniq<JoinNode>(my_index, std::move(cte_column_names), std::move(left_cte_name),
+		                           std::move(right_cte_name), JoinType::INNER, std::move(cross_condition));
+	}
 	case LogicalOperatorType::LOGICAL_ORDER_BY: {
 		const LogicalOrder &order_op = subplan->Cast<LogicalOrder>();
 		vector<string> order_items;

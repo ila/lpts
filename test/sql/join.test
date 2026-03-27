@@ -76,3 +76,14 @@ query I
 PRAGMA lpts_check('SELECT id, name FROM users UNION ALL SELECT id, name FROM users');
 ----
 true
+
+# CROSS JOIN / CROSS PRODUCT
+query I
+PRAGMA lpts_check('SELECT u.name, o.amount FROM users u CROSS JOIN orders o');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT u.name, s.salary FROM users u, staff s');
+----
+true

@@ -102,8 +102,8 @@ InsertionOrderPreservingMap<string> AstFilterNode::GetExtraInfo() const {
 
 string AstProjectNode::ToString(int indent) const {
 	string result = Indent(indent) + "Project";
-	result +=
-	    " (table_index=" + std::to_string(table_index) + ", expressions=" + std::to_string(expressions.size()) + ")";
+	result += " (table_index=" + std::to_string(table_index) + ", expressions=" + std::to_string(expressions.size()) +
+	          ")";
 	for (size_t i = 0; i < expressions.size(); i++) {
 		result += "\n" + Indent(indent + 2) + cte_column_names[i] + " <- " + expressions[i];
 	}
@@ -240,6 +240,53 @@ InsertionOrderPreservingMap<string> AstInsertNode::GetExtraInfo() const {
 	info.insert("Target", target_table);
 	info.insert("On Conflict", EnumUtil::ToString(action_type));
 	return info;
+}
+
+//------------------------------------------------------------------------------
+// AstOrderNode
+//------------------------------------------------------------------------------
+
+string AstOrderNode::ToString(int indent) const {
+	string result = Indent(indent) + "Order";
+	result += " (" + std::to_string(order_items.size()) + " items)";
+	for (auto &item : order_items) {
+		result += "\n" + Indent(indent + 2) + "by: " + item;
+	}
+	for (auto &child : children) {
+		result += "\n" + child->ToString(indent + 2);
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
+// AstLimitNode
+//------------------------------------------------------------------------------
+
+string AstLimitNode::ToString(int indent) const {
+	string result = Indent(indent) + "Limit";
+	if (!limit_str.empty()) {
+		result += " LIMIT=" + limit_str;
+	}
+	if (!offset_str.empty()) {
+		result += " OFFSET=" + offset_str;
+	}
+	for (auto &child : children) {
+		result += "\n" + child->ToString(indent + 2);
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
+// AstDistinctNode
+//------------------------------------------------------------------------------
+
+string AstDistinctNode::ToString(int indent) const {
+	string result = Indent(indent) + "Distinct";
+	result += " (columns=" + std::to_string(cte_column_names.size()) + ")";
+	for (auto &child : children) {
+		result += "\n" + child->ToString(indent + 2);
+	}
+	return result;
 }
 
 //------------------------------------------------------------------------------

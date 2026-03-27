@@ -41,6 +41,9 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/operator/logical_limit.hpp"
+#include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 namespace duckdb {
@@ -274,6 +277,7 @@ private:
 	//--------------------------------------------------------------------------
 	unique_ptr<AstNode> BuildNode(unique_ptr<LogicalOperator> &op) {
 		switch (op->type) {
+
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_GET: {
 			const LogicalGet &get = op->Cast<LogicalGet>();
@@ -313,8 +317,9 @@ private:
 				}
 			}
 
-			return make_uniq<AstGetNode>(catalog_name, schema_name, table_name, table_index, std::move(column_names),
-			                             std::move(cte_column_names), std::move(table_filters));
+			return make_uniq<AstGetNode>(catalog_name, schema_name, table_name, table_index,
+			                            std::move(column_names), std::move(cte_column_names),
+			                            std::move(table_filters));
 		}
 
 		//----------------------------------------------------------------------
@@ -399,8 +404,7 @@ private:
 				}
 				// Join child expressions with commas
 				for (size_t ci = 0; ci < child_exprs.size(); ++ci) {
-					if (ci > 0)
-						agg_str << ", ";
+					if (ci > 0) agg_str << ", ";
 					agg_str << child_exprs[ci];
 				}
 				agg_str << ")";
@@ -412,7 +416,7 @@ private:
 			}
 
 			return make_uniq<AstAggregateNode>(std::move(group_names), std::move(agg_expressions),
-			                                   std::move(cte_column_names));
+			                                    std::move(cte_column_names));
 		}
 
 		//----------------------------------------------------------------------
@@ -448,6 +452,65 @@ private:
 				column_map[MappableColumnBinding(union_bindings[i])] = std::move(new_col);
 			}
 			return make_uniq<AstUnionNode>(set_op.setop_all, std::move(cte_column_names));
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_ORDER_BY: {
+			const LogicalOrder &order_op = op->Cast<LogicalOrder>();
+			vector<string> order_items;
+			for (const BoundOrderByNode &order : order_op.orders) {
+				string col_str = ExpressionToAliasedString(order.expression);
+				switch (order.type) {
+				case OrderType::DESCENDING:
+					col_str += " DESC";
+					break;
+				case OrderType::ASCENDING:
+					col_str += " ASC";
+					break;
+				default:
+					break;
+				}
+				order_items.push_back(std::move(col_str));
+			}
+			// Pass bindings through from child.
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+			}
+			return make_uniq<AstOrderNode>(std::move(order_items), std::move(cte_column_names));
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_LIMIT: {
+			const LogicalLimit &limit_op = op->Cast<LogicalLimit>();
+			string limit_str;
+			if (limit_op.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
+				limit_str = std::to_string(limit_op.limit_val.GetConstantValue());
+			} else if (limit_op.limit_val.Type() != LimitNodeType::UNSET) {
+				throw NotImplementedException("LPTS: only constant LIMIT values are supported");
+			}
+			string offset_str;
+			if (limit_op.offset_val.Type() == LimitNodeType::CONSTANT_VALUE) {
+				offset_str = std::to_string(limit_op.offset_val.GetConstantValue());
+			} else if (limit_op.offset_val.Type() != LimitNodeType::UNSET) {
+				throw NotImplementedException("LPTS: only constant OFFSET values are supported");
+			}
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+			}
+			return make_uniq<AstLimitNode>(std::move(limit_str), std::move(offset_str),
+			                              std::move(cte_column_names));
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_DISTINCT: {
+			// LogicalDistinct passes bindings unchanged from child.
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+			}
+			return make_uniq<AstDistinctNode>(std::move(cte_column_names));
 		}
 
 		//----------------------------------------------------------------------
@@ -573,7 +636,7 @@ private:
 			string catalog_out = (dialect == SqlDialect::POSTGRES) ? "" : get.catalog;
 			string schema_out = (dialect == SqlDialect::POSTGRES) ? "" : get.schema;
 			return make_uniq<GetNode>(my_index, get.cte_column_names, catalog_out, schema_out, get.table_name,
-			                          get.table_index, get.table_filters, get.column_names);
+			                         get.table_index, get.table_filters, get.column_names);
 		}
 
 		if (type == "Filter") {
@@ -587,22 +650,22 @@ private:
 			const AstProjectNode &proj = static_cast<const AstProjectNode &>(ast_node);
 			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
 			return make_uniq<ProjectNode>(my_index, proj.cte_column_names, child_cte_name, proj.expressions,
-			                              proj.table_index);
+			                             proj.table_index);
 		}
 
 		if (type == "Aggregate") {
 			const AstAggregateNode &agg = static_cast<const AstAggregateNode &>(ast_node);
 			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			return make_uniq<AggregateNode>(my_index, agg.cte_column_names, child_cte_name, agg.group_by_columns,
-			                                agg.aggregate_expressions);
+			return make_uniq<AggregateNode>(my_index, agg.cte_column_names, child_cte_name,
+			                               agg.group_by_columns, agg.aggregate_expressions);
 		}
 
 		if (type == "Join") {
 			const AstJoinNode &join = static_cast<const AstJoinNode &>(ast_node);
 			const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
 			const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
-			return make_uniq<JoinNode>(my_index, join.cte_column_names, left_cte_name, right_cte_name, join.join_type,
-			                           join.conditions);
+			return make_uniq<JoinNode>(my_index, join.cte_column_names, left_cte_name, right_cte_name,
+			                          join.join_type, join.conditions);
 		}
 
 		if (type == "Union") {
@@ -610,6 +673,24 @@ private:
 			const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
 			const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
 			return make_uniq<UnionNode>(my_index, u.cte_column_names, left_cte_name, right_cte_name, u.is_union_all);
+		}
+
+		if (type == "Order") {
+			const AstOrderNode &o = static_cast<const AstOrderNode &>(ast_node);
+			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
+			return make_uniq<OrderNode>(my_index, o.cte_column_names, child_cte_name, o.order_items);
+		}
+
+		if (type == "Limit") {
+			const AstLimitNode &l = static_cast<const AstLimitNode &>(ast_node);
+			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
+			return make_uniq<LimitNode>(my_index, l.cte_column_names, child_cte_name, l.limit_str, l.offset_str);
+		}
+
+		if (type == "Distinct") {
+			const AstDistinctNode &d = static_cast<const AstDistinctNode &>(ast_node);
+			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
+			return make_uniq<DistinctNode>(my_index, d.cte_column_names, child_cte_name);
 		}
 
 		// Operators not yet implemented.
@@ -631,9 +712,9 @@ public:
 		// Build the FinalReadNode: maps CTE column names back to original names.
 		vector<string> final_column_list;
 		const string &type = root.NodeType();
-		const vector<string> &cte_cols = (type == "Project")
-		                                     ? static_cast<const AstProjectNode &>(root).cte_column_names
-		                                     : last_cte->cte_column_list;
+		const vector<string> &cte_cols =
+		    (type == "Project") ? static_cast<const AstProjectNode &>(root).cte_column_names
+		                        : last_cte->cte_column_list;
 
 		for (const string &cte_col : cte_cols) {
 			// cte_col = "t1_name"  →  strip "tN_" prefix to get user-visible name.

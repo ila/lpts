@@ -100,7 +100,8 @@ public:
 	size_t table_index;
 
 	AstProjectNode(vector<string> expressions, vector<string> cte_column_names, size_t table_index)
-	    : expressions(std::move(expressions)), cte_column_names(std::move(cte_column_names)), table_index(table_index) {
+	    : expressions(std::move(expressions)), cte_column_names(std::move(cte_column_names)),
+	      table_index(table_index) {
 	}
 
 	string ToString(int indent = 0) const override;
@@ -134,7 +135,7 @@ public:
 class AstJoinNode : public AstNode {
 public:
 	JoinType join_type;
-	vector<string> conditions;       ///< Join conditions as strings (e.g. "(t0_id = t1_user_id)").
+	vector<string> conditions;   ///< Join conditions as strings (e.g. "(t0_id = t1_user_id)").
 	vector<string> cte_column_names; ///< All output column names (left ++ right).
 
 	AstJoinNode(JoinType join_type, vector<string> conditions, vector<string> cte_column_names)
@@ -180,6 +181,55 @@ public:
 		return "Insert";
 	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
+};
+
+/// ORDER BY node — wraps child with ORDER BY clause.
+class AstOrderNode : public AstNode {
+public:
+	vector<string> order_items;      ///< e.g. "t1_age DESC", "t0_name ASC"
+	vector<string> cte_column_names; ///< passthrough from child.
+
+	AstOrderNode(vector<string> order_items, vector<string> cte_column_names)
+	    : order_items(std::move(order_items)), cte_column_names(std::move(cte_column_names)) {
+	}
+
+	string ToString(int indent = 0) const override;
+	string NodeType() const override {
+		return "Order";
+	}
+};
+
+/// LIMIT / OFFSET node.
+class AstLimitNode : public AstNode {
+public:
+	string limit_str;                ///< e.g. "10", or empty if no LIMIT.
+	string offset_str;               ///< e.g. "5", or empty if no OFFSET.
+	vector<string> cte_column_names; ///< passthrough from child.
+
+	AstLimitNode(string limit_str, string offset_str, vector<string> cte_column_names)
+	    : limit_str(std::move(limit_str)), offset_str(std::move(offset_str)),
+	      cte_column_names(std::move(cte_column_names)) {
+	}
+
+	string ToString(int indent = 0) const override;
+	string NodeType() const override {
+		return "Limit";
+	}
+};
+
+/// SELECT DISTINCT node.
+class AstDistinctNode : public AstNode {
+public:
+	vector<string> cte_column_names; ///< passthrough from child.
+
+	explicit AstDistinctNode(vector<string> cte_column_names)
+	    : cte_column_names(std::move(cte_column_names)) {
+	}
+
+	string ToString(int indent = 0) const override;
+	string NodeType() const override {
+		return "Distinct";
+	}
 };
 
 /// Pretty-print the full AST tree starting from the given root node.

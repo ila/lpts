@@ -1,0 +1,32 @@
+# name: test/sql/having.test
+# description: test lpts with HAVING clauses (GROUP BY + post-aggregate filter)
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE sales (product VARCHAR, region VARCHAR, amount INTEGER);
+
+# HAVING count(*) > n
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) > 5');
+----
+WITH scan_0 (t0_product) AS (SELECT product FROM memory.main.sales),  aggregate_1 (t2_product, t3_aggregate_0) AS (SELECT t0_product, count_star() FROM scan_0 GROUP BY t0_product),  filter_2 AS (SELECT * FROM aggregate_1 WHERE (t3_aggregate_0) > (CAST(5 AS BIGINT))),  projection_3 (t1_product, t1_aggregate_0) AS (SELECT t2_product, t3_aggregate_0 FROM filter_2) SELECT t1_product AS product, t1_aggregate_0 AS aggregate_0 FROM projection_3;
+
+# HAVING sum(amount) > n
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT region, sum(amount) FROM sales GROUP BY region HAVING sum(amount) > 1000');
+----
+WITH scan_0 (t0_region, t0_amount) AS (SELECT region, amount FROM memory.main.sales),  aggregate_1 (t2_region, t3_aggregate_0) AS (SELECT t0_region, sum(t0_amount) FROM scan_0 GROUP BY t0_region),  filter_2 AS (SELECT * FROM aggregate_1 WHERE (t3_aggregate_0) > (CAST(1000 AS HUGEINT))),  projection_3 (t1_region, t1_aggregate_0) AS (SELECT t2_region, t3_aggregate_0 FROM filter_2) SELECT t1_region AS region, t1_aggregate_0 AS aggregate_0 FROM projection_3;
+
+# WHERE filters before aggregation, HAVING filters after
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT product, count(*) FROM sales WHERE amount > 100 GROUP BY product HAVING count(*) > 2');
+----
+WITH scan_0 (t0_amount, t0_product) AS (SELECT amount, product FROM memory.main.sales),  filter_1 AS (SELECT * FROM scan_0 WHERE (t0_amount) > (CAST(100 AS INTEGER))),  aggregate_2 (t2_product, t3_aggregate_0) AS (SELECT t0_product, count_star() FROM filter_1 GROUP BY t0_product),  filter_3 AS (SELECT * FROM aggregate_2 WHERE (t3_aggregate_0) > (CAST(2 AS BIGINT))),  projection_4 (t1_product, t1_aggregate_0) AS (SELECT t2_product, t3_aggregate_0 FROM filter_3) SELECT t1_product AS product, t1_aggregate_0 AS aggregate_0 FROM projection_4;
+
+# WHERE on a string column + HAVING on sum
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT region, sum(amount) FROM sales WHERE region = ''EU'' GROUP BY region HAVING sum(amount) > 500');
+----
+WITH scan_0 (t0_region, t0_amount) AS (SELECT region, amount FROM memory.main.sales),  filter_1 AS (SELECT * FROM scan_0 WHERE (t0_region) = (CAST('EU' AS VARCHAR))),  aggregate_2 (t2_region, t3_aggregate_0) AS (SELECT t0_region, sum(t0_amount) FROM filter_1 GROUP BY t0_region),  filter_3 AS (SELECT * FROM aggregate_2 WHERE (t3_aggregate_0) > (CAST(500 AS HUGEINT))),  projection_4 (t1_region, t1_aggregate_0) AS (SELECT t2_region, t3_aggregate_0 FROM filter_3) SELECT t1_region AS region, t1_aggregate_0 AS aggregate_0 FROM projection_4;

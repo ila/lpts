@@ -41,6 +41,9 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/operator/logical_limit.hpp"
+#include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 namespace duckdb {
@@ -274,6 +277,7 @@ private:
 	//--------------------------------------------------------------------------
 	unique_ptr<AstNode> BuildNode(unique_ptr<LogicalOperator> &op) {
 		switch (op->type) {
+
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_GET: {
 			const LogicalGet &get = op->Cast<LogicalGet>();
@@ -451,6 +455,64 @@ private:
 		}
 
 		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_ORDER_BY: {
+			const LogicalOrder &order_op = op->Cast<LogicalOrder>();
+			vector<string> order_items;
+			for (const BoundOrderByNode &order : order_op.orders) {
+				string col_str = ExpressionToAliasedString(order.expression);
+				switch (order.type) {
+				case OrderType::DESCENDING:
+					col_str += " DESC";
+					break;
+				case OrderType::ASCENDING:
+					col_str += " ASC";
+					break;
+				default:
+					break;
+				}
+				order_items.push_back(std::move(col_str));
+			}
+			// Pass bindings through from child.
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+			}
+			return make_uniq<AstOrderNode>(std::move(order_items), std::move(cte_column_names));
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_LIMIT: {
+			const LogicalLimit &limit_op = op->Cast<LogicalLimit>();
+			string limit_str;
+			if (limit_op.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
+				limit_str = std::to_string(limit_op.limit_val.GetConstantValue());
+			} else if (limit_op.limit_val.Type() != LimitNodeType::UNSET) {
+				throw NotImplementedException("LPTS: only constant LIMIT values are supported");
+			}
+			string offset_str;
+			if (limit_op.offset_val.Type() == LimitNodeType::CONSTANT_VALUE) {
+				offset_str = std::to_string(limit_op.offset_val.GetConstantValue());
+			} else if (limit_op.offset_val.Type() != LimitNodeType::UNSET) {
+				throw NotImplementedException("LPTS: only constant OFFSET values are supported");
+			}
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+			}
+			return make_uniq<AstLimitNode>(std::move(limit_str), std::move(offset_str), std::move(cte_column_names));
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_DISTINCT: {
+			// LogicalDistinct passes bindings unchanged from child.
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+			}
+			return make_uniq<AstDistinctNode>(std::move(cte_column_names));
+		}
+
+		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_INSERT:
 			throw NotImplementedException("AstBuilder: LOGICAL_INSERT is not yet implemented");
 		default:
@@ -610,6 +672,24 @@ private:
 			const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
 			const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
 			return make_uniq<UnionNode>(my_index, u.cte_column_names, left_cte_name, right_cte_name, u.is_union_all);
+		}
+
+		if (type == "Order") {
+			const AstOrderNode &o = static_cast<const AstOrderNode &>(ast_node);
+			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
+			return make_uniq<OrderNode>(my_index, o.cte_column_names, child_cte_name, o.order_items);
+		}
+
+		if (type == "Limit") {
+			const AstLimitNode &l = static_cast<const AstLimitNode &>(ast_node);
+			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
+			return make_uniq<LimitNode>(my_index, l.cte_column_names, child_cte_name, l.limit_str, l.offset_str);
+		}
+
+		if (type == "Distinct") {
+			const AstDistinctNode &d = static_cast<const AstDistinctNode &>(ast_node);
+			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
+			return make_uniq<DistinctNode>(my_index, d.cte_column_names, child_cte_name);
 		}
 
 		// Operators not yet implemented.

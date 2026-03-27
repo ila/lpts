@@ -1,0 +1,26 @@
+# name: test/sql/cast.test
+# description: test lpts with CAST and TRY_CAST expressions
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE nums (val VARCHAR, n INTEGER);
+
+# CAST in projection — CAST(val AS INTEGER) appears in the SELECT expression
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT CAST(val AS INTEGER) FROM nums');
+----
+WITH scan_0 (t0_val) AS (SELECT val FROM memory.main.nums),  projection_1 (t1_scalar_0) AS (SELECT CAST(t0_val AS INTEGER) FROM scan_0) SELECT t1_scalar_0 AS scalar_0 FROM projection_1;
+
+# CAST in WHERE filter — CAST(val AS INTEGER) used in comparison condition
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT n FROM nums WHERE CAST(val AS INTEGER) > 10');
+----
+WITH scan_0 (t0_val, t0_n) AS (SELECT val, n FROM memory.main.nums),  filter_1 AS (SELECT * FROM scan_0 WHERE (CAST(t0_val AS INTEGER)) > (CAST(10 AS INTEGER))),  projection_2 (t1_n) AS (SELECT t0_n FROM filter_1) SELECT t1_n AS n FROM projection_2;
+
+# TRY_CAST — returns NULL instead of throwing on failure; emitted as TRY_CAST(...)
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT TRY_CAST(val AS DOUBLE) FROM nums');
+----
+WITH scan_0 (t0_val) AS (SELECT val FROM memory.main.nums),  projection_1 (t1_scalar_0) AS (SELECT TRY_CAST(t0_val AS DOUBLE) FROM scan_0) SELECT t1_scalar_0 AS scalar_0 FROM projection_1;

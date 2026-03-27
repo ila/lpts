@@ -266,6 +266,48 @@ public:
 	string ToQuery() override;
 };
 
+/// ORDER BY node — wraps the child CTE with an ORDER BY clause.
+class OrderNode : public CteNode {
+	string child_cte_name;
+	vector<string> order_items; ///< e.g. "t1_age DESC", "t0_name ASC"
+public:
+	~OrderNode() override = default;
+	OrderNode(const size_t index, vector<string> cte_column_names, string _child_cte_name, vector<string> _order_items)
+	    : CteNode(index, "order_" + std::to_string(index), std::move(cte_column_names)),
+	      child_cte_name(std::move(_child_cte_name)), order_items(std::move(_order_items)) {
+	}
+	string ToQuery() override;
+};
+
+/// LIMIT / OFFSET node — wraps the child CTE with LIMIT and optional OFFSET.
+class LimitNode : public CteNode {
+	string child_cte_name;
+	string limit_str;  ///< e.g. "10" or "" if no LIMIT
+	string offset_str; ///< e.g. "5"  or "" if no OFFSET
+public:
+	~LimitNode() override = default;
+	LimitNode(const size_t index, vector<string> cte_column_names, string _child_cte_name, string _limit_str,
+	          string _offset_str)
+	    : CteNode(index, "limit_" + std::to_string(index), std::move(cte_column_names)),
+	      child_cte_name(std::move(_child_cte_name)), limit_str(std::move(_limit_str)),
+	      offset_str(std::move(_offset_str)) {
+	}
+	string ToQuery() override;
+};
+
+/// DISTINCT node — wraps the child CTE with SELECT DISTINCT.
+class DistinctNode : public CteNode {
+	string child_cte_name;
+
+public:
+	~DistinctNode() override = default;
+	DistinctNode(const size_t index, vector<string> cte_column_names, string _child_cte_name)
+	    : CteNode(index, "distinct_" + std::to_string(index), std::move(cte_column_names)),
+	      child_cte_name(std::move(_child_cte_name)) {
+	}
+	string ToQuery() override;
+};
+
 /// The complete CTE list: an ordered list of CTE nodes + one final (root) node.
 /// Calling ToQuery() serializes the whole thing into a single SQL string.
 class CteList {

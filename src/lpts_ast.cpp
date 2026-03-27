@@ -243,6 +243,53 @@ InsertionOrderPreservingMap<string> AstInsertNode::GetExtraInfo() const {
 }
 
 //------------------------------------------------------------------------------
+// AstOrderNode
+//------------------------------------------------------------------------------
+
+string AstOrderNode::ToString(int indent) const {
+	string result = Indent(indent) + "Order";
+	result += " (" + std::to_string(order_items.size()) + " items)";
+	for (auto &item : order_items) {
+		result += "\n" + Indent(indent + 2) + "by: " + item;
+	}
+	for (auto &child : children) {
+		result += "\n" + child->ToString(indent + 2);
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
+// AstLimitNode
+//------------------------------------------------------------------------------
+
+string AstLimitNode::ToString(int indent) const {
+	string result = Indent(indent) + "Limit";
+	if (!limit_str.empty()) {
+		result += " LIMIT=" + limit_str;
+	}
+	if (!offset_str.empty()) {
+		result += " OFFSET=" + offset_str;
+	}
+	for (auto &child : children) {
+		result += "\n" + child->ToString(indent + 2);
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
+// AstDistinctNode
+//------------------------------------------------------------------------------
+
+string AstDistinctNode::ToString(int indent) const {
+	string result = Indent(indent) + "Distinct";
+	result += " (columns=" + std::to_string(cte_column_names.size()) + ")";
+	for (auto &child : children) {
+		result += "\n" + child->ToString(indent + 2);
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
 // PrintAst — free function
 //------------------------------------------------------------------------------
 

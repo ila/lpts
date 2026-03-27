@@ -1,0 +1,20 @@
+# name: test/sql/functions.test
+# description: test lpts with scalar function calls (BOUND_FUNCTION expressions)
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE users (id INTEGER, name VARCHAR, age INTEGER);
+
+# Scalar function in projection
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT length(name) FROM users');
+----
+WITH scan_0 (t0_name) AS (SELECT name FROM memory.main.users),  projection_1 (t1_scalar_0) AS (SELECT length(t0_name) FROM scan_0) SELECT t1_scalar_0 AS scalar_0 FROM projection_1;
+
+# Scalar function in projection + scalar function in WHERE filter
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT upper(name), age FROM users WHERE length(name) > 3');
+----
+WITH scan_0 (t0_name, t0_age) AS (SELECT name, age FROM memory.main.users),  filter_1 AS (SELECT * FROM scan_0 WHERE (length(t0_name)) > (CAST(3 AS BIGINT))),  projection_2 (t1_scalar_0, t1_age) AS (SELECT upper(t0_name), t0_age FROM filter_1) SELECT t1_scalar_0 AS scalar_0, t1_age AS age FROM projection_2;

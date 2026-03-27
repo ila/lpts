@@ -20,9 +20,10 @@
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -34,9 +35,12 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_set.hpp"
 #include "duckdb/planner/planner.hpp"
+
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_cross_product.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/operator/logical_limit.hpp"
+#include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"
 #include "duckdb/planner/expression/bound_lambda_expression.hpp"
@@ -236,6 +240,33 @@ string ExceptNode::ToQuery() {
 	except_str << "SELECT * FROM ";
 	except_str << right_cte_name;
 	return except_str.str();
+}
+
+string OrderNode::ToQuery() {
+	std::ostringstream order_str;
+	order_str << "SELECT * FROM " << child_cte_name;
+	if (!order_items.empty()) {
+		order_str << " ORDER BY " << VecToSeparatedList(order_items);
+	}
+	return order_str.str();
+}
+
+string LimitNode::ToQuery() {
+	std::ostringstream limit_str_stream;
+	limit_str_stream << "SELECT * FROM " << child_cte_name;
+	if (!limit_str.empty()) {
+		limit_str_stream << " LIMIT " << limit_str;
+	}
+	if (!offset_str.empty()) {
+		limit_str_stream << " OFFSET " << offset_str;
+	}
+	return limit_str_stream.str();
+}
+
+string DistinctNode::ToQuery() {
+	std::ostringstream distinct_str;
+	distinct_str << "SELECT DISTINCT * FROM " << child_cte_name;
+	return distinct_str.str();
 }
 
 /// Serialize the entire CTE list into a SQL string.
@@ -743,6 +774,58 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		}
 		return make_uniq<JoinNode>(my_index, std::move(cte_column_names), std::move(left_cte_name),
 		                           std::move(right_cte_name), plan_as_join.join_type, std::move(join_conditions));
+	}
+	case LogicalOperatorType::LOGICAL_ORDER_BY: {
+		const LogicalOrder &order_op = subplan->Cast<LogicalOrder>();
+		vector<string> order_items;
+		for (const BoundOrderByNode &order : order_op.orders) {
+			string col_str = ExpressionToAliasedString(order.expression);
+			switch (order.type) {
+			case OrderType::DESCENDING:
+				col_str += " DESC";
+				break;
+			case OrderType::ASCENDING:
+				col_str += " ASC";
+				break;
+			default:
+				break; // ORDER_DEFAULT: no explicit keyword
+			}
+			order_items.push_back(std::move(col_str));
+		}
+		vector<string> cte_column_names;
+		for (const ColumnBinding &cb : subplan->GetColumnBindings()) {
+			cte_column_names.push_back(column_map.at(cb)->ToUniqueColumnName());
+		}
+		return make_uniq<OrderNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name,
+		                            std::move(order_items));
+	}
+	case LogicalOperatorType::LOGICAL_LIMIT: {
+		const LogicalLimit &limit_op = subplan->Cast<LogicalLimit>();
+		string limit_str;
+		if (limit_op.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
+			limit_str = std::to_string(limit_op.limit_val.GetConstantValue());
+		} else if (limit_op.limit_val.Type() != LimitNodeType::UNSET) {
+			throw NotImplementedException("LPTS: only constant LIMIT values are supported");
+		}
+		string offset_str;
+		if (limit_op.offset_val.Type() == LimitNodeType::CONSTANT_VALUE) {
+			offset_str = std::to_string(limit_op.offset_val.GetConstantValue());
+		} else if (limit_op.offset_val.Type() != LimitNodeType::UNSET) {
+			throw NotImplementedException("LPTS: only constant OFFSET values are supported");
+		}
+		vector<string> cte_column_names;
+		for (const ColumnBinding &cb : subplan->GetColumnBindings()) {
+			cte_column_names.push_back(column_map.at(cb)->ToUniqueColumnName());
+		}
+		return make_uniq<LimitNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name,
+		                            std::move(limit_str), std::move(offset_str));
+	}
+	case LogicalOperatorType::LOGICAL_DISTINCT: {
+		vector<string> cte_column_names;
+		for (const ColumnBinding &cb : subplan->GetColumnBindings()) {
+			cte_column_names.push_back(column_map.at(cb)->ToUniqueColumnName());
+		}
+		return make_uniq<DistinctNode>(my_index, std::move(cte_column_names), cte_nodes[children_indices[0]]->cte_name);
 	}
 	default: {
 		throw NotImplementedException("This logical operator is not implemented: %s.",

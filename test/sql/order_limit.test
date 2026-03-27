@@ -1,0 +1,38 @@
+# name: test/sql/order_limit.test
+# description: test lpts with ORDER BY and LIMIT/OFFSET queries
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE users (id INTEGER, name VARCHAR, age INTEGER);
+
+# ORDER BY single column DESC
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users ORDER BY age DESC');
+----
+WITH scan_0 (t0_id, t0_name, t0_age) AS (SELECT id, name, age FROM memory.main.users),  projection_1 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM scan_0),  order_2 (t1_id, t1_name, t1_age) AS (SELECT * FROM projection_1 ORDER BY t1_age DESC),  projection_3 (t6_id, t6_name) AS (SELECT t1_id, t1_name FROM order_2) SELECT t6_id AS id, t6_name AS name FROM projection_3;
+
+# ORDER BY multiple columns (ASC + DESC)
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users ORDER BY name ASC, age DESC');
+----
+WITH scan_0 (t0_id, t0_name, t0_age) AS (SELECT id, name, age FROM memory.main.users),  projection_1 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM scan_0),  order_2 (t1_id, t1_name, t1_age) AS (SELECT * FROM projection_1 ORDER BY t1_name ASC, t1_age DESC),  projection_3 (t6_id, t6_name) AS (SELECT t1_id, t1_name FROM order_2) SELECT t6_id AS id, t6_name AS name FROM projection_3;
+
+# LIMIT only
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users LIMIT 10');
+----
+WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  projection_1 (t1_id, t1_name) AS (SELECT t0_id, t0_name FROM scan_0),  limit_2 (t1_id, t1_name) AS (SELECT * FROM projection_1 LIMIT 10) SELECT t1_id AS id, t1_name AS name FROM limit_2;
+
+# LIMIT with OFFSET
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users LIMIT 5 OFFSET 10');
+----
+WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  projection_1 (t1_id, t1_name) AS (SELECT t0_id, t0_name FROM scan_0),  limit_2 (t1_id, t1_name) AS (SELECT * FROM projection_1 LIMIT 5 OFFSET 10) SELECT t1_id AS id, t1_name AS name FROM limit_2;
+
+# ORDER BY + LIMIT combined
+query I
+SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users ORDER BY age DESC LIMIT 3');
+----
+WITH scan_0 (t0_id, t0_name, t0_age) AS (SELECT id, name, age FROM memory.main.users),  projection_1 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM scan_0),  order_2 (t1_id, t1_name, t1_age) AS (SELECT * FROM projection_1 ORDER BY t1_age DESC),  limit_3 (t1_id, t1_name, t1_age) AS (SELECT * FROM order_2 LIMIT 3),  projection_4 (t6_id, t6_name) AS (SELECT t1_id, t1_name FROM limit_3) SELECT t6_id AS id, t6_name AS name FROM projection_4;

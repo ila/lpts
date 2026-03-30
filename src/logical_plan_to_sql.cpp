@@ -46,6 +46,7 @@
 #include "duckdb/planner/expression/bound_lambda_expression.hpp"
 #include "duckdb/planner/expression/bound_lambdaref_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/function/lambda_functions.hpp"
 
@@ -142,7 +143,7 @@ string GetNode::ToQuery() {
 	}
 	if (!table_filters.empty()) {
 		get_str << " WHERE ";
-		get_str << VecToSeparatedList(table_filters);
+		get_str << VecToSeparatedList(table_filters, " AND ");
 	}
 	return get_str.str();
 }
@@ -153,7 +154,7 @@ string FilterNode::ToQuery() {
 	get_str << child_cte_name;
 	if (!conditions.empty()) {
 		get_str << " WHERE ";
-		get_str << VecToSeparatedList(conditions);
+		get_str << VecToSeparatedList(conditions, " AND ");
 	}
 	return get_str.str();
 }
@@ -484,6 +485,27 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 		expr_str << " END";
 		break;
 	}
+	case (ExpressionClass::BOUND_OPERATOR): {
+		const BoundOperatorExpression &op_expr = expression->Cast<BoundOperatorExpression>();
+		auto op_type = op_expr.GetExpressionType();
+		if (op_type == ExpressionType::OPERATOR_COALESCE) {
+			expr_str << "COALESCE(";
+			for (idx_t i = 0; i < op_expr.children.size(); i++) {
+				if (i > 0) {
+					expr_str << ", ";
+				}
+				expr_str << ExpressionToAliasedString(op_expr.children[i]);
+			}
+			expr_str << ")";
+		} else if (op_type == ExpressionType::OPERATOR_IS_NULL) {
+			expr_str << "(" << ExpressionToAliasedString(op_expr.children[0]) << " IS NULL)";
+		} else if (op_type == ExpressionType::OPERATOR_IS_NOT_NULL) {
+			expr_str << "(" << ExpressionToAliasedString(op_expr.children[0]) << " IS NOT NULL)";
+		} else {
+			throw NotImplementedException("Unsupported BOUND_OPERATOR type: %s", ExpressionTypeToString(op_type));
+		}
+		break;
+	}
 	default: {
 		throw NotImplementedException("Unsupported expression for ExpressionToAliasedString: %s",
 		                              ExpressionTypeToString(expression->type));
@@ -697,7 +719,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 					}
 					agg_str << VecToSeparatedList(child_expressions);
 					agg_str << ")";
-					string agg_alias = "aggregate_" + std::to_string(i);
+					string agg_alias = expr->alias.empty() ? ("aggregate_" + std::to_string(i)) : expr->alias;
 					agg_col_struct = make_uniq<ColStruct>(aggregate_table_idx, agg_str.str(), std::move(agg_alias));
 				} else {
 					throw NotImplementedException("Only supporting BoundAggregateExpression for now.");
@@ -900,9 +922,14 @@ unique_ptr<CteList> LogicalPlanToSql::LogicalPlanToCteList() {
 	default: {
 		unique_ptr<CteNode> last_cte = CreateCteNode(plan, children_indices);
 		vector<string> final_column_list;
-		for (const auto &cb : plan->GetColumnBindings()) {
-			const unique_ptr<ColStruct> &col_struct = column_map.at(cb);
-			final_column_list.emplace_back(col_struct->alias.empty() ? col_struct->column_name : col_struct->alias);
+		auto plan_bindings = plan->GetColumnBindings();
+		for (size_t i = 0; i < plan_bindings.size(); i++) {
+			if (i < output_names.size() && !output_names[i].empty()) {
+				final_column_list.emplace_back(output_names[i]);
+			} else {
+				const unique_ptr<ColStruct> &col_struct = column_map.at(plan_bindings[i]);
+				final_column_list.emplace_back(col_struct->alias.empty() ? col_struct->column_name : col_struct->alias);
+			}
 		}
 		unique_ptr<FinalReadNode> final_node = make_uniq<FinalReadNode>(
 		    node_count++, last_cte->cte_name, last_cte->cte_column_list, std::move(final_column_list));

@@ -365,6 +365,8 @@ private:
 
 	/// Counter used to give each CTE a unique index (scan_0, filter_1, ...).
 	size_t node_count = 0;
+	/// Optional output column names (from Planner.names). Overrides final column aliases.
+	vector<string> output_names;
 	/// Accumulates CTE nodes in bottom-up order during traversal.
 	vector<unique_ptr<CteNode>> cte_nodes;
 	/// Global mapping from DuckDB's internal ColumnBinding → our ColStruct.
@@ -384,7 +386,8 @@ private:
 	unique_ptr<CteNode> RecursiveTraversal(unique_ptr<LogicalOperator> &sub_plan);
 
 public:
-	LogicalPlanToSql(ClientContext &_context, unique_ptr<LogicalOperator> &_plan) : context(_context), plan(_plan) {
+	LogicalPlanToSql(ClientContext &_context, unique_ptr<LogicalOperator> &_plan, vector<string> _output_names = {})
+	    : context(_context), plan(_plan), output_names(std::move(_output_names)) {
 	}
 
 	/// Convert the logical plan to a CTE list.

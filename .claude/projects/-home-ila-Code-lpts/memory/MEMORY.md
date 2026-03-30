@@ -1,0 +1,1 @@
+- [feedback_build_command.md](feedback_build_command.md) — Always use `GEN=ninja make` to build

@@ -645,17 +645,22 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 				column_names.push_back(descendant_col_struct->ToUniqueColumnName());
 				string col_name = descendant_col_struct->column_name;
 				string alias = descendant_col_struct->alias;
-				// Deduplicate: projections joining multiple tables can have same-named columns
-				string &dedup_field = alias.empty() ? col_name : alias;
-				string base_name = dedup_field;
-				string unique_name = "t" + to_string(table_index) + "_" + dedup_field;
+				// Deduplicate: projections joining multiple tables can have same-named columns.
+				// Build unique CTE column name; append _N suffix on collision.
+				string base = alias.empty() ? col_name : alias;
+				string deduped = base;
+				string unique_name = "t" + to_string(table_index) + "_" + deduped;
 				for (size_t suffix = i; seen_names.count(unique_name); suffix++) {
-					dedup_field = base_name + "_" + to_string(suffix);
-					unique_name = "t" + to_string(table_index) + "_" + dedup_field;
+					deduped = base + "_" + to_string(suffix);
+					unique_name = "t" + to_string(table_index) + "_" + deduped;
 				}
 				seen_names.insert(unique_name);
-				printf("[LPTS_DBG] i=%zu col='%s' alias='%s' cte='%s'\n", i, col_name.c_str(), alias.c_str(),
-				       ("t" + to_string(table_index) + "_" + (alias.empty() ? col_name : alias)).c_str());
+				// Store deduped name back into col_name or alias for the ColStruct
+				if (alias.empty()) {
+					col_name = deduped;
+				} else {
+					alias = deduped;
+				}
 				auto new_col_struct = make_uniq<ColStruct>(table_index, col_name, alias);
 				cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
 				column_map[new_cb] = std::move(new_col_struct);
@@ -771,15 +776,25 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		}
 		unordered_set<string> seen_names;
 		for (size_t i = 0; i < lhs_cte_cols.size(); ++i) {
-			// Extract base name from CTE column name (strip "tN_" prefix)
+			// Extract base name from CTE column name by stripping the "tN_" prefix.
+			// CTE names follow the format "t<digits>_<base>". We find the underscore
+			// that separates the table index from the column name.
 			string full_name = lhs_cte_cols[i];
-			size_t prefix_end = full_name.find('_');
-			string col_name = (prefix_end != string::npos) ? full_name.substr(prefix_end + 1) : full_name;
+			string col_name = full_name;
+			if (full_name.size() > 1 && full_name[0] == 't' && isdigit(full_name[1])) {
+				size_t sep = 1;
+				while (sep < full_name.size() && isdigit(full_name[sep])) {
+					sep++;
+				}
+				if (sep < full_name.size() && full_name[sep] == '_') {
+					col_name = full_name.substr(sep + 1);
+				}
+			}
 			// Deduplicate column names to avoid ambiguous references in generated SQL
+			string base = col_name;
 			string unique_name = "t" + to_string(table_index) + "_" + col_name;
 			for (size_t suffix = i; seen_names.count(unique_name); suffix++) {
-				col_name = ((prefix_end != string::npos) ? full_name.substr(prefix_end + 1) : full_name) + "_" +
-				           to_string(suffix);
+				col_name = base + "_" + to_string(suffix);
 				unique_name = "t" + to_string(table_index) + "_" + col_name;
 			}
 			seen_names.insert(unique_name);

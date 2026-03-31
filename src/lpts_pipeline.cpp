@@ -348,15 +348,21 @@ private:
 					expressions.push_back(desc->ToUniqueColumnName());
 					string col_name = desc->column_name;
 					string alias = desc->alias;
-					// Deduplicate: joins can produce same-named columns from different tables
-					string &dedup_field = alias.empty() ? col_name : alias;
-					string base_name = dedup_field;
-					string unique_name = "t" + to_string(table_index) + "_" + dedup_field;
+					// Deduplicate: joins can produce same-named columns from different tables.
+					// Build unique CTE column name; append _N suffix on collision.
+					string base = alias.empty() ? col_name : alias;
+					string deduped = base;
+					string unique_name = "t" + to_string(table_index) + "_" + deduped;
 					for (size_t suffix = i; seen_names.count(unique_name); suffix++) {
-						dedup_field = base_name + "_" + to_string(suffix);
-						unique_name = "t" + to_string(table_index) + "_" + dedup_field;
+						deduped = base + "_" + to_string(suffix);
+						unique_name = "t" + to_string(table_index) + "_" + deduped;
 					}
 					seen_names.insert(unique_name);
+					if (alias.empty()) {
+						col_name = deduped;
+					} else {
+						alias = deduped;
+					}
 					auto new_col = make_uniq<ColStruct>(table_index, col_name, alias);
 					cte_column_names.push_back(new_col->ToUniqueColumnName());
 					column_map[MappableColumnBinding(new_cb)] = std::move(new_col);

@@ -714,7 +714,8 @@ private:
 			if (children_indices.size() == 2) {
 				const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
 				const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
-				return make_uniq<UnionNode>(my_index, u.cte_column_names, left_cte_name, right_cte_name, u.is_union_all);
+				return make_uniq<UnionNode>(my_index, u.cte_column_names, left_cte_name, right_cte_name,
+				                            u.is_union_all);
 			}
 			// N-ary UNION: chain as left-deep binary UNIONs
 			// (A UNION B UNION C) → UNION(UNION(A, B), C)

@@ -386,8 +386,8 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 			func_name = "sum";
 		}
 		// Arithmetic operators: render as infix (arg1 op arg2) instead of func(arg1, arg2)
-		if ((func_name == "/" || func_name == "+" || func_name == "-" || func_name == "*" ||
-		     func_name == "%" || func_name == "**") &&
+		if ((func_name == "/" || func_name == "+" || func_name == "-" || func_name == "*" || func_name == "%" ||
+		     func_name == "**") &&
 		    func_expr.children.size() == 2) {
 			expr_str << "(" << ExpressionToAliasedString(func_expr.children[0]) << " " << func_name << " "
 			         << ExpressionToAliasedString(func_expr.children[1]) << ")";
@@ -916,8 +916,8 @@ unique_ptr<CteNode> LogicalPlanToSql::RecursiveTraversal(unique_ptr<LogicalOpera
 		// Deep-copy column_map before right child, restore after
 		std::map<MappableColumnBinding, unique_ptr<ColStruct>> saved_map;
 		for (auto &entry : column_map) {
-			saved_map[entry.first] = make_uniq<ColStruct>(entry.second->table_index, entry.second->column_name,
-			                                               entry.second->alias);
+			saved_map[entry.first] =
+			    make_uniq<ColStruct>(entry.second->table_index, entry.second->column_name, entry.second->alias);
 		}
 		auto right_node = RecursiveTraversal(sub_plan->children[1]);
 		children_indices.push_back(right_node->idx);

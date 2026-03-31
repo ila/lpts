@@ -385,6 +385,14 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 		if (func_name == "sum_no_overflow") {
 			func_name = "sum";
 		}
+		// Arithmetic operators: render as infix (arg1 op arg2) instead of func(arg1, arg2)
+		if ((func_name == "/" || func_name == "+" || func_name == "-" || func_name == "*" ||
+		     func_name == "%" || func_name == "**") &&
+		    func_expr.children.size() == 2) {
+			expr_str << "(" << ExpressionToAliasedString(func_expr.children[0]) << " " << func_name << " "
+			         << ExpressionToAliasedString(func_expr.children[1]) << ")";
+			break;
+		}
 		// For lambda functions, only serialize non-lambda, non-capture children
 		idx_t child_count = func_expr.children.size();
 		if (func_expr.function.HasBindLambdaCallback()) {
@@ -622,13 +630,12 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 	}
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
 		// PROJECTION = column selection and computed expressions.
-		// For simple column references, we look up the child's column in column_map.
-		// For expressions (e.g. "a + b"), we convert them to SQL strings.
 		const LogicalProjection &plan_as_projection = subplan->Cast<LogicalProjection>();
 		const size_t table_index = plan_as_projection.table_index;
 
 		vector<string> column_names;
 		vector<string> cte_column_names;
+		unordered_set<string> seen_names;
 		for (size_t i = 0; i < plan_as_projection.expressions.size(); ++i) {
 			const unique_ptr<Expression> &expression = plan_as_projection.expressions[i];
 			const ColumnBinding new_cb = ColumnBinding(table_index, i);
@@ -636,16 +643,32 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 				BoundColumnRefExpression &bcr = expression->Cast<BoundColumnRefExpression>();
 				unique_ptr<ColStruct> &descendant_col_struct = column_map.at(bcr.binding);
 				column_names.push_back(descendant_col_struct->ToUniqueColumnName());
-				auto new_col_struct =
-				    make_uniq<ColStruct>(table_index, descendant_col_struct->column_name, descendant_col_struct->alias);
+				string col_name = descendant_col_struct->column_name;
+				string alias = descendant_col_struct->alias;
+				// Deduplicate: projections joining multiple tables can have same-named columns
+				string &dedup_field = alias.empty() ? col_name : alias;
+				string base_name = dedup_field;
+				string unique_name = "t" + to_string(table_index) + "_" + dedup_field;
+				for (size_t suffix = i; seen_names.count(unique_name); suffix++) {
+					dedup_field = base_name + "_" + to_string(suffix);
+					unique_name = "t" + to_string(table_index) + "_" + dedup_field;
+				}
+				seen_names.insert(unique_name);
+				printf("[LPTS_DBG] i=%zu col='%s' alias='%s' cte='%s'\n", i, col_name.c_str(), alias.c_str(),
+				       ("t" + to_string(table_index) + "_" + (alias.empty() ? col_name : alias)).c_str());
+				auto new_col_struct = make_uniq<ColStruct>(table_index, col_name, alias);
 				cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
 				column_map[new_cb] = std::move(new_col_struct);
 			} else {
 				string expr_str = ExpressionToAliasedString(expression);
 				column_names.emplace_back(expr_str);
-				// Always use index-based alias for CTE columns to avoid duplicates
-				// (DuckDB may assign the same alias to multiple expressions)
 				string scalar_alias = "scalar_" + std::to_string(i);
+				string unique_name = "t" + to_string(table_index) + "_" + scalar_alias;
+				for (size_t suffix = i; seen_names.count(unique_name); suffix++) {
+					scalar_alias = "scalar_" + to_string(i) + "_" + to_string(suffix);
+					unique_name = "t" + to_string(table_index) + "_" + scalar_alias;
+				}
+				seen_names.insert(unique_name);
 				auto new_col_struct = make_uniq<ColStruct>(table_index, expr_str, scalar_alias);
 				cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
 				column_map[new_cb] = std::move(new_col_struct);
@@ -736,23 +759,31 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		const LogicalSetOperation &plan_as_union = subplan->Cast<LogicalSetOperation>();
 		const size_t table_index = plan_as_union.table_index;
 		vector<string> cte_column_names;
-		const auto &lhs_bindings = subplan->children[0]->GetColumnBindings();
 		const auto &union_bindings = subplan->GetColumnBindings();
-		if (lhs_bindings.size() != union_bindings.size()) {
-			throw InternalException("LPTS: Size mismatch between column bindings");
+		// Derive names from the left child's finalized CTE column list, NOT from
+		// column_map lookups. The right child's bottom-up processing may overwrite
+		// left-child column_map entries when subtrees share table indices
+		// (e.g., CTE inlining, plan copies, optimizer rewrites).
+		const auto &lhs_cte_cols = cte_nodes[children_indices[0]]->cte_column_list;
+		if (lhs_cte_cols.size() != union_bindings.size()) {
+			throw InternalException("LPTS: Size mismatch between union column bindings (%zu) and lhs CTE columns (%zu)",
+			                        union_bindings.size(), lhs_cte_cols.size());
 		}
 		unordered_set<string> seen_names;
-		for (size_t i = 0; i < lhs_bindings.size(); ++i) {
-			const unique_ptr<ColStruct> &lhs_col_struct = column_map.at(lhs_bindings[i]);
-			string col_name = lhs_col_struct->column_name;
-			string alias = lhs_col_struct->alias;
+		for (size_t i = 0; i < lhs_cte_cols.size(); ++i) {
+			// Extract base name from CTE column name (strip "tN_" prefix)
+			string full_name = lhs_cte_cols[i];
+			size_t prefix_end = full_name.find('_');
+			string col_name = (prefix_end != string::npos) ? full_name.substr(prefix_end + 1) : full_name;
 			// Deduplicate column names to avoid ambiguous references in generated SQL
 			string unique_name = "t" + to_string(table_index) + "_" + col_name;
-			if (seen_names.count(unique_name)) {
-				col_name = col_name + "_" + to_string(i);
+			for (size_t suffix = i; seen_names.count(unique_name); suffix++) {
+				col_name = ((prefix_end != string::npos) ? full_name.substr(prefix_end + 1) : full_name) + "_" +
+				           to_string(suffix);
+				unique_name = "t" + to_string(table_index) + "_" + col_name;
 			}
-			seen_names.insert("t" + to_string(table_index) + "_" + col_name);
-			unique_ptr<ColStruct> new_col_struct = make_uniq<ColStruct>(table_index, col_name, alias);
+			seen_names.insert(unique_name);
+			unique_ptr<ColStruct> new_col_struct = make_uniq<ColStruct>(table_index, col_name, "");
 			cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
 			column_map[union_bindings[i]] = std::move(new_col_struct);
 		}
@@ -875,10 +906,29 @@ unique_ptr<CteNode> LogicalPlanToSql::RecursiveTraversal(unique_ptr<LogicalOpera
 	LPTS_DEBUG_PRINT("[LPTS] RecursiveTraversal: type=" + LogicalOperatorToString(sub_plan->type) +
 	                 " num_children=" + std::to_string(sub_plan->children.size()));
 	vector<size_t> children_indices;
-	for (auto &child : sub_plan->children) {
-		unique_ptr<CteNode> child_as_node = RecursiveTraversal(child);
-		children_indices.push_back(child_as_node->idx);
-		cte_nodes.emplace_back(std::move(child_as_node));
+	if (sub_plan->type == LogicalOperatorType::LOGICAL_UNION && sub_plan->children.size() == 2) {
+		// UNION ALL: scope column_map to prevent the right child's bottom-up processing
+		// from overwriting left-child entries (subtrees may share table indices via
+		// CTE inlining, plan copies, or optimizer rewrites).
+		auto left_node = RecursiveTraversal(sub_plan->children[0]);
+		children_indices.push_back(left_node->idx);
+		cte_nodes.emplace_back(std::move(left_node));
+		// Deep-copy column_map before right child, restore after
+		std::map<MappableColumnBinding, unique_ptr<ColStruct>> saved_map;
+		for (auto &entry : column_map) {
+			saved_map[entry.first] = make_uniq<ColStruct>(entry.second->table_index, entry.second->column_name,
+			                                               entry.second->alias);
+		}
+		auto right_node = RecursiveTraversal(sub_plan->children[1]);
+		children_indices.push_back(right_node->idx);
+		cte_nodes.emplace_back(std::move(right_node));
+		column_map = std::move(saved_map);
+	} else {
+		for (auto &child : sub_plan->children) {
+			unique_ptr<CteNode> child_as_node = RecursiveTraversal(child);
+			children_indices.push_back(child_as_node->idx);
+			cte_nodes.emplace_back(std::move(child_as_node));
+		}
 	}
 	unique_ptr<CteNode> to_return = CreateCteNode(sub_plan, children_indices);
 	return to_return;

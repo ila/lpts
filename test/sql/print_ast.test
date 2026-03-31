@@ -27,3 +27,27 @@ query I
 SELECT replace(ast, chr(10), ' | ') FROM print_ast_query('SELECT u.name, sum(o.amount) FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.name');
 ----
 Project (table_index=2, expressions=2) |   t2_name <- t3_name |   t2_aggregate_0 <- t4_aggregate_0 |   Aggregate (groups=1, aggregates=1) |     group_by: [t0_name] |     t4_aggregate_0 <- sum(t1_amount) |     Join (INNER, conditions=1) |       on: (t0_id = t1_user_id) |       Get memory.main.users (table_index=0) |         columns: [id, name] |       Get memory.main.orders (table_index=1) |         columns: [user_id, amount]
+
+# Cross product — should produce Join(INNER, ON TRUE)
+query I
+PRAGMA lpts_check('SELECT u.name, o.amount FROM users u CROSS JOIN orders o');
+----
+true
+
+# Duplicate column names — deduplication in projection
+query I
+PRAGMA lpts_check('SELECT u.id, o.id FROM users u CROSS JOIN orders o');
+----
+true
+
+# UNION ALL — AST roundtrip
+query I
+PRAGMA lpts_check('SELECT id FROM users UNION ALL SELECT user_id FROM orders');
+----
+true
+
+# Arithmetic in projection — infix rendering
+query I
+PRAGMA lpts_check('SELECT id + age, age * 2 FROM users');
+----
+true

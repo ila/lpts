@@ -1,0 +1,65 @@
+# name: test/sql/cross_product.test
+# description: test lpts with CROSS PRODUCT / CROSS JOIN queries
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE users (id INTEGER, name VARCHAR);
+
+statement ok
+CREATE TABLE orders (id INTEGER, user_id INTEGER, amount DECIMAL);
+
+statement ok
+CREATE TABLE staff (id INTEGER, dept VARCHAR, salary INTEGER);
+
+statement ok
+INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');
+
+statement ok
+INSERT INTO orders VALUES (1, 1, 100), (2, 2, 200);
+
+statement ok
+INSERT INTO staff VALUES (1, 'eng', 50000), (2, 'sales', 60000);
+
+# Explicit CROSS JOIN
+query I
+PRAGMA lpts_check('SELECT u.name, o.amount FROM users u CROSS JOIN orders o');
+----
+true
+
+# Implicit cross product (comma notation)
+query I
+PRAGMA lpts_check('SELECT u.name, s.salary FROM users u, staff s');
+----
+true
+
+# 3-way cross product
+query I
+PRAGMA lpts_check('SELECT u.name, o.amount, s.salary FROM users u, orders o, staff s');
+----
+true
+
+# Cross product with filter (optimizer may convert to COMPARISON_JOIN or keep as CROSS + FILTER)
+query I
+PRAGMA lpts_check('SELECT u.name, o.amount FROM users u, orders o WHERE u.id = o.user_id');
+----
+true
+
+# Cross product with aggregate
+query I
+PRAGMA lpts_check('SELECT u.name, SUM(o.amount) FROM users u CROSS JOIN orders o GROUP BY u.name');
+----
+true
+
+# Cross product preserves all columns from both sides
+query I
+PRAGMA lpts_check('SELECT u.id, u.name, o.id, o.user_id, o.amount FROM users u CROSS JOIN orders o');
+----
+true
+
+# Cross product with duplicate column names (both tables have "id")
+query I
+PRAGMA lpts_check('SELECT u.id, o.id FROM users u CROSS JOIN orders o');
+----
+true

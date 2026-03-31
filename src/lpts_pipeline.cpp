@@ -336,6 +336,7 @@ private:
 			const size_t table_index = proj.table_index;
 			vector<string> expressions;
 			vector<string> cte_column_names;
+			unordered_set<string> seen_names;
 
 			for (size_t i = 0; i < proj.expressions.size(); ++i) {
 				const unique_ptr<Expression> &expr = proj.expressions[i];
@@ -345,13 +346,30 @@ private:
 					BoundColumnRefExpression &bcr = expr->Cast<BoundColumnRefExpression>();
 					unique_ptr<ColStruct> &desc = column_map.at(MappableColumnBinding(bcr.binding));
 					expressions.push_back(desc->ToUniqueColumnName());
-					auto new_col = make_uniq<ColStruct>(table_index, desc->column_name, desc->alias);
+					string col_name = desc->column_name;
+					string alias = desc->alias;
+					// Deduplicate: joins can produce same-named columns from different tables
+					string &dedup_field = alias.empty() ? col_name : alias;
+					string base_name = dedup_field;
+					string unique_name = "t" + to_string(table_index) + "_" + dedup_field;
+					for (size_t suffix = i; seen_names.count(unique_name); suffix++) {
+						dedup_field = base_name + "_" + to_string(suffix);
+						unique_name = "t" + to_string(table_index) + "_" + dedup_field;
+					}
+					seen_names.insert(unique_name);
+					auto new_col = make_uniq<ColStruct>(table_index, col_name, alias);
 					cte_column_names.push_back(new_col->ToUniqueColumnName());
 					column_map[MappableColumnBinding(new_cb)] = std::move(new_col);
 				} else {
 					string expr_str = ExpressionToAliasedString(expr);
 					expressions.emplace_back(expr_str);
 					string scalar_alias = expr->HasAlias() ? expr->GetAlias() : "scalar_" + std::to_string(i);
+					string unique_name = "t" + to_string(table_index) + "_" + scalar_alias;
+					for (size_t suffix = i; seen_names.count(unique_name); suffix++) {
+						scalar_alias = "scalar_" + to_string(i) + "_" + to_string(suffix);
+						unique_name = "t" + to_string(table_index) + "_" + scalar_alias;
+					}
+					seen_names.insert(unique_name);
 					auto new_col = make_uniq<ColStruct>(table_index, expr_str, std::move(scalar_alias));
 					cte_column_names.push_back(new_col->ToUniqueColumnName());
 					column_map[MappableColumnBinding(new_cb)] = std::move(new_col);
@@ -538,8 +556,24 @@ private:
 	unique_ptr<AstNode> RecursiveTraversal(unique_ptr<LogicalOperator> &op) {
 		// 1. Recurse into children first (post-order).
 		vector<unique_ptr<AstNode>> child_nodes;
-		for (auto &child : op->children) {
-			child_nodes.push_back(RecursiveTraversal(child));
+		if (op->type == LogicalOperatorType::LOGICAL_UNION && op->children.size() >= 2) {
+			// UNION ALL: scope column_map to prevent sibling children from overwriting
+			// each other's entries when subtrees share table indices.
+			child_nodes.push_back(RecursiveTraversal(op->children[0]));
+			// Save column_map after first child; restore before each subsequent child
+			std::map<MappableColumnBinding, unique_ptr<ColStruct>> saved_map;
+			for (auto &entry : column_map) {
+				saved_map[entry.first] =
+				    make_uniq<ColStruct>(entry.second->table_index, entry.second->column_name, entry.second->alias);
+			}
+			for (size_t ci = 1; ci < op->children.size(); ci++) {
+				child_nodes.push_back(RecursiveTraversal(op->children[ci]));
+			}
+			column_map = std::move(saved_map);
+		} else {
+			for (auto &child : op->children) {
+				child_nodes.push_back(RecursiveTraversal(child));
+			}
 		}
 		// 2. Build this node (column_map is now populated by children).
 		unique_ptr<AstNode> node = BuildNode(op);
@@ -677,9 +711,31 @@ private:
 
 		if (type == "Union") {
 			const AstUnionNode &u = static_cast<const AstUnionNode &>(ast_node);
-			const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
-			return make_uniq<UnionNode>(my_index, u.cte_column_names, left_cte_name, right_cte_name, u.is_union_all);
+			if (children_indices.size() == 2) {
+				const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
+				const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
+				return make_uniq<UnionNode>(my_index, u.cte_column_names, left_cte_name, right_cte_name, u.is_union_all);
+			}
+			// N-ary UNION: chain as left-deep binary UNIONs
+			// (A UNION B UNION C) → UNION(UNION(A, B), C)
+			string prev_cte_name = cte_nodes[children_indices[0]]->cte_name;
+			for (size_t ci = 1; ci < children_indices.size(); ci++) {
+				const string &right_cte_name = cte_nodes[children_indices[ci]]->cte_name;
+				if (ci < children_indices.size() - 1) {
+					// Intermediate union — create a CTE and add to cte_nodes
+					size_t intermediate_index = node_count++;
+					auto intermediate = make_uniq<UnionNode>(intermediate_index, u.cte_column_names, prev_cte_name,
+					                                         right_cte_name, u.is_union_all);
+					prev_cte_name = intermediate->cte_name;
+					cte_nodes.push_back(std::move(intermediate));
+				} else {
+					// Final union — use the current my_index
+					return make_uniq<UnionNode>(my_index, u.cte_column_names, prev_cte_name, right_cte_name,
+					                            u.is_union_all);
+				}
+			}
+			// Shouldn't reach here, but just in case
+			throw InternalException("AstFlattener: empty UNION chain");
 		}
 
 		if (type == "Order") {

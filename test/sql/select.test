@@ -39,3 +39,24 @@ query I
 PRAGMA lpts_check('SELECT * FROM users WHERE age > 25');
 ----
 true
+
+# Arithmetic expressions — rendered as infix (a + b), not function calls +(a, b)
+query I
+PRAGMA lpts_check('SELECT id + age FROM users');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT id * age + 1 FROM users');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT age / NULLIF(id, 0) FROM users');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT age - id, age % 3 FROM users');
+----
+true

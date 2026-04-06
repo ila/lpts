@@ -77,6 +77,23 @@ PRAGMA lpts_check('SELECT id, name FROM users UNION ALL SELECT id, name FROM use
 ----
 true
 
+# Duplicate column names across tables (projection deduplication)
+query I
+PRAGMA lpts_check('SELECT u.id, o.id FROM users u INNER JOIN orders o ON u.id = o.user_id');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT u.id, o.id, s.id FROM users u, orders o, staff s');
+----
+true
+
+# Self-join (same table twice — same column names)
+query I
+PRAGMA lpts_check('SELECT a.id, b.id, a.name FROM users a INNER JOIN users b ON a.id = b.id');
+----
+true
+
 # CROSS JOIN / CROSS PRODUCT
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u CROSS JOIN orders o');

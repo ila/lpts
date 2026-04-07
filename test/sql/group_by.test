@@ -7,46 +7,207 @@ require lpts
 statement ok
 CREATE TABLE sales (product VARCHAR, region VARCHAR, amount INTEGER);
 
-# Scalar aggregate (count without GROUP BY)
+statement ok
+INSERT INTO sales VALUES
+  ('A', 'EU', 100), ('A', 'EU', 200), ('A', 'US', 300),
+  ('B', 'EU', 50),  ('B', 'US', 400), ('B', 'US', 150);
+
+# --- Scalar aggregate: COUNT(*) with no GROUP BY ---
+
 query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT count(*) FROM sales');
+PRAGMA lpts_exec('SELECT count(*) FROM sales');
 ----
-WITH scan_0 AS (SELECT * FROM memory.main.sales),  aggregate_1 (t3_aggregate_0) AS (SELECT count_star() FROM scan_0),  projection_2 (t1_aggregate_0) AS (SELECT t3_aggregate_0 FROM aggregate_1) SELECT t1_aggregate_0 AS aggregate_0 FROM projection_2;
+6
 
 query I
 PRAGMA lpts_check('SELECT count(*) FROM sales');
 ----
 true
 
-# Group by with count
+# --- Scalar aggregate: SUM over entire table ---
+
 query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT product, count(*) FROM sales GROUP BY product');
+PRAGMA lpts_exec('SELECT sum(amount) FROM sales');
 ----
-WITH scan_0 (t0_product) AS (SELECT product FROM memory.main.sales),  aggregate_1 (t2_product, t3_aggregate_0) AS (SELECT t0_product, count_star() FROM scan_0 GROUP BY t0_product),  projection_2 (t1_product, t1_aggregate_0) AS (SELECT t2_product, t3_aggregate_0 FROM aggregate_1) SELECT t1_product AS product, t1_aggregate_0 AS aggregate_0 FROM projection_2;
+1200
+
+query I
+PRAGMA lpts_check('SELECT sum(amount) FROM sales');
+----
+true
+
+# --- Scalar aggregate: MIN and MAX ---
+
+query I
+PRAGMA lpts_check('SELECT min(amount) FROM sales');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT max(amount) FROM sales');
+----
+true
+
+# --- GROUP BY single column with COUNT ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT product, count(*) FROM sales GROUP BY product');
+----
+A	3
+B	3
 
 query I
 PRAGMA lpts_check('SELECT product, count(*) FROM sales GROUP BY product');
 ----
 true
 
-# Group by with sum
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT region, sum(amount) FROM sales GROUP BY region');
+# --- GROUP BY single column with SUM ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT region, sum(amount) FROM sales GROUP BY region');
 ----
-WITH scan_0 (t0_region, t0_amount) AS (SELECT region, amount FROM memory.main.sales),  aggregate_1 (t2_region, t3_aggregate_0) AS (SELECT t0_region, sum(t0_amount) FROM scan_0 GROUP BY t0_region),  projection_2 (t1_region, t1_aggregate_0) AS (SELECT t2_region, t3_aggregate_0 FROM aggregate_1) SELECT t1_region AS region, t1_aggregate_0 AS aggregate_0 FROM projection_2;
+EU	350
+US	850
 
 query I
 PRAGMA lpts_check('SELECT region, sum(amount) FROM sales GROUP BY region');
 ----
 true
 
-# Multiple group by columns
+# --- GROUP BY single column with AVG ---
+
 query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT product, region, count(*) FROM sales GROUP BY product, region');
+PRAGMA lpts_check('SELECT product, avg(amount) FROM sales GROUP BY product');
 ----
-WITH scan_0 (t0_product, t0_region) AS (SELECT product, region FROM memory.main.sales),  aggregate_1 (t2_product, t2_region, t3_aggregate_0) AS (SELECT t0_product, t0_region, count_star() FROM scan_0 GROUP BY t0_product, t0_region),  projection_2 (t1_product, t1_region, t1_aggregate_0) AS (SELECT t2_product, t2_region, t3_aggregate_0 FROM aggregate_1) SELECT t1_product AS product, t1_region AS region, t1_aggregate_0 AS aggregate_0 FROM projection_2;
+true
+
+# --- GROUP BY single column with MIN / MAX ---
+
+query I
+PRAGMA lpts_check('SELECT region, min(amount), max(amount) FROM sales GROUP BY region');
+----
+true
+
+# --- GROUP BY multiple columns ---
+
+query III rowsort
+PRAGMA lpts_exec('SELECT product, region, count(*) FROM sales GROUP BY product, region');
+----
+A	EU	2
+A	US	1
+B	EU	1
+B	US	2
 
 query I
 PRAGMA lpts_check('SELECT product, region, count(*) FROM sales GROUP BY product, region');
+----
+true
+
+# --- GROUP BY with WHERE: filter applied before aggregation ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT product, count(*) FROM sales WHERE amount > 100 GROUP BY product');
+----
+A	2
+B	2
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM sales WHERE amount > 100 GROUP BY product');
+----
+true
+
+# --- GROUP BY with multiple aggregates in the same query ---
+
+query I
+PRAGMA lpts_check('SELECT product, count(*), sum(amount), min(amount), max(amount) FROM sales GROUP BY product');
+----
+true
+
+# --- COUNT(DISTINCT col): de-duplicates before counting ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT region, count(DISTINCT product) FROM sales GROUP BY region');
+----
+EU	2
+US	2
+
+query I
+PRAGMA lpts_check('SELECT region, count(DISTINCT product) FROM sales GROUP BY region');
+----
+true
+
+# --- GROUP BY on a table with a single group (all rows same key) ---
+
+statement ok
+CREATE TABLE uniform (grp VARCHAR, val INTEGER);
+
+statement ok
+INSERT INTO uniform VALUES ('X', 1), ('X', 2), ('X', 3);
+
+query II
+PRAGMA lpts_exec('SELECT grp, sum(val) FROM uniform GROUP BY grp');
+----
+X	6
+
+query I
+PRAGMA lpts_check('SELECT grp, sum(val) FROM uniform GROUP BY grp');
+----
+true
+
+# --- GROUP BY on empty table: no groups, no rows ---
+
+statement ok
+CREATE TABLE empty_sales (product VARCHAR, amount INTEGER);
+
+query II
+PRAGMA lpts_exec('SELECT product, count(*) FROM empty_sales GROUP BY product');
+----
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM empty_sales GROUP BY product');
+----
+true
+
+# --- COUNT(*) on empty table returns 0 ---
+
+query I
+PRAGMA lpts_exec('SELECT count(*) FROM empty_sales');
+----
+0
+
+query I
+PRAGMA lpts_check('SELECT count(*) FROM empty_sales');
+----
+true
+
+# --- GROUP BY with NULL values: NULLs form their own group ---
+
+statement ok
+CREATE TABLE nullable_grp (cat VARCHAR, val INTEGER);
+
+statement ok
+INSERT INTO nullable_grp VALUES ('A', 10), (NULL, 20), (NULL, 30), ('A', 5);
+
+query I
+PRAGMA lpts_check('SELECT cat, sum(val) FROM nullable_grp GROUP BY cat');
+----
+true
+
+# --- Aggregate ignores NULLs: SUM(NULL-containing col) ---
+
+statement ok
+CREATE TABLE with_nulls (grp VARCHAR, val INTEGER);
+
+statement ok
+INSERT INTO with_nulls VALUES ('A', 10), ('A', NULL), ('B', NULL), ('B', NULL);
+
+query II rowsort
+PRAGMA lpts_exec('SELECT grp, sum(val) FROM with_nulls GROUP BY grp');
+----
+A	10
+B	NULL
+
+query I
+PRAGMA lpts_check('SELECT grp, sum(val) FROM with_nulls GROUP BY grp');
 ----
 true

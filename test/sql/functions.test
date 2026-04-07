@@ -7,14 +7,173 @@ require lpts
 statement ok
 CREATE TABLE users (id INTEGER, name VARCHAR, age INTEGER);
 
-# Scalar function in projection
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT length(name) FROM users');
-----
-WITH scan_0 (t0_name) AS (SELECT name FROM memory.main.users),  projection_1 (t1_scalar_0) AS (SELECT length(t0_name) FROM scan_0) SELECT t1_scalar_0 AS scalar_0 FROM projection_1;
+statement ok
+INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Carol', 35), (4, 'dave', 22);
 
-# Scalar function in projection + scalar function in WHERE filter
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT upper(name), age FROM users WHERE length(name) > 3');
+# --- length() in projection ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT name, length(name) FROM users');
 ----
-WITH scan_0 (t0_name, t0_age) AS (SELECT name, age FROM memory.main.users),  filter_1 AS (SELECT * FROM scan_0 WHERE (length(t0_name)) > (CAST(3 AS BIGINT))),  projection_2 (t1_scalar_0, t1_age) AS (SELECT upper(t0_name), t0_age FROM filter_1) SELECT t1_scalar_0 AS scalar_0, t1_age AS age FROM projection_2;
+Alice	5
+Bob	3
+Carol	5
+dave	4
+
+query I
+PRAGMA lpts_check('SELECT name, length(name) FROM users');
+----
+true
+
+# --- upper() in projection: string to uppercase ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT upper(name) FROM users');
+----
+ALICE
+BOB
+CAROL
+DAVE
+
+query I
+PRAGMA lpts_check('SELECT upper(name) FROM users');
+----
+true
+
+# --- lower() in projection ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT lower(name) FROM users');
+----
+alice
+bob
+carol
+dave
+
+query I
+PRAGMA lpts_check('SELECT lower(name) FROM users');
+----
+true
+
+# --- length() in WHERE filter ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT name, age FROM users WHERE length(name) > 3');
+----
+Alice	30
+Carol	35
+dave	22
+
+query I
+PRAGMA lpts_check('SELECT name, age FROM users WHERE length(name) > 3');
+----
+true
+
+# --- upper() in projection + length() in WHERE filter combined ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT upper(name), age FROM users WHERE length(name) > 3');
+----
+ALICE	30
+CAROL	35
+DAVE	22
+
+query I
+PRAGMA lpts_check('SELECT upper(name), age FROM users WHERE length(name) > 3');
+----
+true
+
+# --- Arithmetic operator (+) as a scalar function in projection ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, age + 1 FROM users');
+----
+1	31
+2	26
+3	36
+4	23
+
+query I
+PRAGMA lpts_check('SELECT id, age + 1 FROM users');
+----
+true
+
+# --- Arithmetic in filter: age - 5 > 20 ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT name FROM users WHERE age - 5 > 20');
+----
+Alice
+Carol
+
+query I
+PRAGMA lpts_check('SELECT name FROM users WHERE age - 5 > 20');
+----
+true
+
+# --- Nested scalar function: upper(lower(name)) ---
+
+query I
+PRAGMA lpts_check('SELECT upper(lower(name)) FROM users');
+----
+true
+
+# --- Scalar function on a constant: length(''hello'') ---
+
+query I
+PRAGMA lpts_check('SELECT length(''hello'') FROM users');
+----
+true
+
+# --- Function applied to integer arithmetic: abs(age - 30) ---
+
+statement ok
+CREATE TABLE scores (player VARCHAR, score INTEGER);
+
+statement ok
+INSERT INTO scores VALUES ('P1', 100), ('P2', -50), ('P3', 0), ('P4', 75);
+
+query II rowsort
+PRAGMA lpts_exec('SELECT player, abs(score) FROM scores');
+----
+P1	100
+P2	50
+P3	0
+P4	75
+
+query I
+PRAGMA lpts_check('SELECT player, abs(score) FROM scores');
+----
+true
+
+# --- Function in both projection and filter ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT player, abs(score) FROM scores WHERE abs(score) > 60');
+----
+P1	100
+P4	75
+
+query I
+PRAGMA lpts_check('SELECT player, abs(score) FROM scores WHERE abs(score) > 60');
+----
+true
+
+# --- Function on NULL input: length(NULL) → NULL ---
+
+statement ok
+CREATE TABLE nullnames (name VARCHAR);
+
+statement ok
+INSERT INTO nullnames VALUES ('hello'), (NULL);
+
+query I rowsort
+PRAGMA lpts_exec('SELECT length(name) FROM nullnames');
+----
+5
+NULL
+
+query I
+PRAGMA lpts_check('SELECT length(name) FROM nullnames');
+----
+true

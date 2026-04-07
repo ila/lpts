@@ -10,23 +10,39 @@ CREATE TABLE t (id INT, val INT);
 statement ok
 INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);
 
-# --- lpts_exec: round-trip produces correct results ---
+# --- lpts_exec: SELECT * round-trip returns identical rows ---
 
-query II
+query II rowsort
 PRAGMA lpts_exec('SELECT * FROM t');
 ----
 1	10
 2	20
 3	30
 
-query II
+# --- lpts_exec: aggregate round-trip returns correct sums ---
+
+query II rowsort
 PRAGMA lpts_exec('SELECT id, sum(val) FROM t GROUP BY id');
 ----
 1	10
 2	20
 3	30
 
-# --- lpts_check: matching queries return true ---
+# --- lpts_exec: filter round-trip ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, val FROM t WHERE val > 10');
+----
+2	20
+3	30
+
+# --- lpts_exec: returns empty on no match ---
+
+query II
+PRAGMA lpts_exec('SELECT id, val FROM t WHERE val > 9999');
+----
+
+# --- lpts_check: basic round-trip returns true ---
 
 query I
 PRAGMA lpts_check('SELECT * FROM t');
@@ -38,7 +54,7 @@ PRAGMA lpts_check('SELECT id, sum(val) FROM t GROUP BY id');
 ----
 true
 
-# --- lpts_check with data: non-empty tables ---
+# --- lpts_check with JOIN ---
 
 statement ok
 CREATE TABLE a (x INT);
@@ -62,14 +78,14 @@ PRAGMA lpts_check('SELECT a.x FROM a JOIN b ON a.x = b.x');
 ----
 true
 
+# --- lpts_check: UNION ALL ---
+
 query I
 PRAGMA lpts_check('SELECT x FROM a UNION ALL SELECT x FROM b');
 ----
 true
 
-# --- lpts_check: detect mismatch via tampered table ---
-# Insert a row, check, then delete it — the check itself should still be true
-# since both sides see the same data at query time.
+# --- lpts_check: consistent after INSERT ---
 
 statement ok
 INSERT INTO a VALUES (99);
@@ -81,3 +97,83 @@ true
 
 statement ok
 DELETE FROM a WHERE x = 99;
+
+# --- lpts_check after DELETE: still true ---
+
+query I
+PRAGMA lpts_check('SELECT * FROM a');
+----
+true
+
+# --- lpts_check: empty table ---
+
+statement ok
+CREATE TABLE empty_t (id INT, val INT);
+
+query I
+PRAGMA lpts_check('SELECT * FROM empty_t');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT count(*) FROM empty_t');
+----
+true
+
+# --- lpts_exec: single-row table ---
+
+statement ok
+CREATE TABLE single (x INT);
+
+statement ok
+INSERT INTO single VALUES (42);
+
+query I
+PRAGMA lpts_exec('SELECT * FROM single');
+----
+42
+
+query I
+PRAGMA lpts_check('SELECT * FROM single');
+----
+true
+
+# --- lpts_exec: NULL values survive round-trip ---
+
+statement ok
+CREATE TABLE nullable (id INT, val INT);
+
+statement ok
+INSERT INTO nullable VALUES (1, NULL), (2, 5), (3, NULL);
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, val FROM nullable');
+----
+1	NULL
+2	5
+3	NULL
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM nullable');
+----
+true
+
+# --- lpts_check: complex query with WHERE + GROUP BY + ORDER BY ---
+
+statement ok
+CREATE TABLE events (user_id INT, event_type VARCHAR, score INT);
+
+statement ok
+INSERT INTO events VALUES
+  (1, 'click', 10), (1, 'view', 5), (2, 'click', 20),
+  (2, 'click', 15), (3, 'view', 8);
+
+query I
+PRAGMA lpts_check('SELECT user_id, sum(score) FROM events WHERE event_type = ''click'' GROUP BY user_id');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT user_id, count(*) FROM events GROUP BY user_id');
+----
+true

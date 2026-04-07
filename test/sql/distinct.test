@@ -7,14 +7,150 @@ require lpts
 statement ok
 CREATE TABLE users (id INTEGER, name VARCHAR, age INTEGER);
 
-# DISTINCT on a single column
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT DISTINCT name FROM users');
-----
-WITH scan_0 (t0_name) AS (SELECT name FROM memory.main.users),  projection_1 (t1_name) AS (SELECT t0_name FROM scan_0),  distinct_2 (t1_name) AS (SELECT DISTINCT * FROM projection_1) SELECT t1_name AS name FROM distinct_2;
+statement ok
+INSERT INTO users VALUES
+  (1, 'Alice', 30), (2, 'Alice', 30), (3, 'Bob', 25),
+  (4, 'Carol', 30), (5, 'Bob', 25);
 
-# DISTINCT with a WHERE filter
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT DISTINCT name FROM users WHERE age > 18');
+# --- DISTINCT on a single column: duplicates removed ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT DISTINCT name FROM users');
 ----
-WITH scan_0 (t0_age, t0_name) AS (SELECT age, name FROM memory.main.users),  filter_1 AS (SELECT * FROM scan_0 WHERE (t0_age) > (CAST(18 AS INTEGER))),  projection_2 (t1_name) AS (SELECT t0_name FROM filter_1),  distinct_3 (t1_name) AS (SELECT DISTINCT * FROM projection_2) SELECT t1_name AS name FROM distinct_3;
+Alice
+Bob
+Carol
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT name FROM users');
+----
+true
+
+# --- DISTINCT on a different single column ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT DISTINCT age FROM users');
+----
+25
+30
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT age FROM users');
+----
+true
+
+# --- DISTINCT on multiple columns: (name, age) pair is the unit of uniqueness ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT DISTINCT name, age FROM users');
+----
+Alice	30
+Bob	25
+Carol	30
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT name, age FROM users');
+----
+true
+
+# --- DISTINCT with WHERE filter applied before de-duplication ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT DISTINCT name FROM users WHERE age > 25');
+----
+Alice
+Carol
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT name FROM users WHERE age > 25');
+----
+true
+
+# --- DISTINCT where filter produces a single unique row ---
+
+query I
+PRAGMA lpts_exec('SELECT DISTINCT name FROM users WHERE name = ''Carol''');
+----
+Carol
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT name FROM users WHERE name = ''Carol''');
+----
+true
+
+# --- DISTINCT on empty table: no rows ---
+
+statement ok
+CREATE TABLE empty_tbl (x INTEGER);
+
+query I
+PRAGMA lpts_exec('SELECT DISTINCT x FROM empty_tbl');
+----
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT x FROM empty_tbl');
+----
+true
+
+# --- DISTINCT on single row: result is that one row ---
+
+statement ok
+CREATE TABLE single_row (x INTEGER, y VARCHAR);
+
+statement ok
+INSERT INTO single_row VALUES (42, 'only');
+
+query II
+PRAGMA lpts_exec('SELECT DISTINCT x, y FROM single_row');
+----
+42	only
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT x, y FROM single_row');
+----
+true
+
+# --- DISTINCT where all rows are identical duplicates ---
+
+statement ok
+CREATE TABLE all_dupes (val INTEGER);
+
+statement ok
+INSERT INTO all_dupes VALUES (7), (7), (7);
+
+query I
+PRAGMA lpts_exec('SELECT DISTINCT val FROM all_dupes');
+----
+7
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT val FROM all_dupes');
+----
+true
+
+# --- DISTINCT with NULL values: NULL is treated as a distinct value ---
+
+statement ok
+CREATE TABLE nullable_distinct (cat VARCHAR);
+
+statement ok
+INSERT INTO nullable_distinct VALUES ('A'), (NULL), ('A'), (NULL), ('B');
+
+query I rowsort
+PRAGMA lpts_exec('SELECT DISTINCT cat FROM nullable_distinct');
+----
+A
+B
+NULL
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT cat FROM nullable_distinct');
+----
+true
+
+# --- DISTINCT combined with integer column ---
+
+query I
+PRAGMA lpts_check('SELECT DISTINCT age FROM users WHERE age >= 25');
+----
+true

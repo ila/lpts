@@ -7,32 +7,216 @@ require lpts
 statement ok
 CREATE TABLE users (id INTEGER, name VARCHAR, age INTEGER);
 
-# ORDER BY single column DESC
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users ORDER BY age DESC');
-----
-WITH scan_0 (t0_id, t0_name, t0_age) AS (SELECT id, name, age FROM memory.main.users),  projection_1 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM scan_0),  order_2 (t1_id, t1_name, t1_age) AS (SELECT * FROM projection_1 ORDER BY t1_age DESC),  projection_3 (t6_id, t6_name) AS (SELECT t1_id, t1_name FROM order_2) SELECT t6_id AS id, t6_name AS name FROM projection_3;
+statement ok
+INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Carol', 35), (4, 'Dave', 25), (5, 'Eve', 30);
 
-# ORDER BY multiple columns (ASC + DESC)
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users ORDER BY name ASC, age DESC');
-----
-WITH scan_0 (t0_id, t0_name, t0_age) AS (SELECT id, name, age FROM memory.main.users),  projection_1 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM scan_0),  order_2 (t1_id, t1_name, t1_age) AS (SELECT * FROM projection_1 ORDER BY t1_name ASC, t1_age DESC),  projection_3 (t6_id, t6_name) AS (SELECT t1_id, t1_name FROM order_2) SELECT t6_id AS id, t6_name AS name FROM projection_3;
+# --- ORDER BY single column DESC ---
 
-# LIMIT only
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users LIMIT 10');
+query III
+PRAGMA lpts_exec('SELECT id, name, age FROM users ORDER BY age DESC');
 ----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  projection_1 (t1_id, t1_name) AS (SELECT t0_id, t0_name FROM scan_0),  limit_2 (t1_id, t1_name) AS (SELECT * FROM projection_1 LIMIT 10) SELECT t1_id AS id, t1_name AS name FROM limit_2;
+3	Carol	35
+1	Alice	30
+5	Eve	30
+2	Bob	25
+4	Dave	25
 
-# LIMIT with OFFSET
 query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users LIMIT 5 OFFSET 10');
+PRAGMA lpts_check('SELECT id, name, age FROM users ORDER BY age DESC');
 ----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  projection_1 (t1_id, t1_name) AS (SELECT t0_id, t0_name FROM scan_0),  limit_2 (t1_id, t1_name) AS (SELECT * FROM projection_1 LIMIT 5 OFFSET 10) SELECT t1_id AS id, t1_name AS name FROM limit_2;
+true
 
-# ORDER BY + LIMIT combined
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users ORDER BY age DESC LIMIT 3');
+# --- ORDER BY single column ASC (default) ---
+
+query III
+PRAGMA lpts_exec('SELECT id, name, age FROM users ORDER BY age ASC');
 ----
-WITH scan_0 (t0_id, t0_name, t0_age) AS (SELECT id, name, age FROM memory.main.users),  projection_1 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM scan_0),  order_2 (t1_id, t1_name, t1_age) AS (SELECT * FROM projection_1 ORDER BY t1_age DESC),  limit_3 (t1_id, t1_name, t1_age) AS (SELECT * FROM order_2 LIMIT 3),  projection_4 (t6_id, t6_name) AS (SELECT t1_id, t1_name FROM limit_3) SELECT t6_id AS id, t6_name AS name FROM projection_4;
+2	Bob	25
+4	Dave	25
+1	Alice	30
+5	Eve	30
+3	Carol	35
+
+query I
+PRAGMA lpts_check('SELECT id, name, age FROM users ORDER BY age ASC');
+----
+true
+
+# --- ORDER BY multiple columns: primary sort age DESC, secondary name ASC for ties ---
+
+query III
+PRAGMA lpts_exec('SELECT id, name, age FROM users ORDER BY age DESC, name ASC');
+----
+3	Carol	35
+1	Alice	30
+5	Eve	30
+2	Bob	25
+4	Dave	25
+
+query I
+PRAGMA lpts_check('SELECT id, name, age FROM users ORDER BY age DESC, name ASC');
+----
+true
+
+# --- ORDER BY: sort on a column not in SELECT ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY age DESC, name ASC');
+----
+3	Carol
+1	Alice
+5	Eve
+2	Bob
+4	Dave
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY age DESC, name ASC');
+----
+true
+
+# --- ORDER BY string column ---
+
+query I
+PRAGMA lpts_exec('SELECT name FROM users ORDER BY name ASC');
+----
+Alice
+Bob
+Carol
+Dave
+Eve
+
+query I
+PRAGMA lpts_check('SELECT name FROM users ORDER BY name ASC');
+----
+true
+
+# --- LIMIT only: return first N rows ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY id LIMIT 3');
+----
+1	Alice
+2	Bob
+3	Carol
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY id LIMIT 3');
+----
+true
+
+# --- LIMIT 1: single row result ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY id LIMIT 1');
+----
+1	Alice
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY id LIMIT 1');
+----
+true
+
+# --- LIMIT larger than row count: returns all rows ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY id LIMIT 100');
+----
+1	Alice
+2	Bob
+3	Carol
+4	Dave
+5	Eve
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY id LIMIT 100');
+----
+true
+
+# --- LIMIT 0: empty result ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY id LIMIT 0');
+----
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY id LIMIT 0');
+----
+true
+
+# --- LIMIT with OFFSET: skip first N rows ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY id LIMIT 2 OFFSET 2');
+----
+3	Carol
+4	Dave
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY id LIMIT 2 OFFSET 2');
+----
+true
+
+# --- OFFSET only (LIMIT larger than count): skip first row ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY id LIMIT 100 OFFSET 4');
+----
+5	Eve
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY id LIMIT 100 OFFSET 4');
+----
+true
+
+# --- OFFSET past end of result: empty ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY id LIMIT 10 OFFSET 10');
+----
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY id LIMIT 10 OFFSET 10');
+----
+true
+
+# --- ORDER BY + LIMIT combined: top-N pattern ---
+
+query II
+PRAGMA lpts_exec('SELECT id, name FROM users ORDER BY age DESC, name ASC LIMIT 3');
+----
+3	Carol
+1	Alice
+5	Eve
+
+query I
+PRAGMA lpts_check('SELECT id, name FROM users ORDER BY age DESC, name ASC LIMIT 3');
+----
+true
+
+# --- ORDER BY after GROUP BY: sort aggregate results ---
+
+query II
+PRAGMA lpts_exec('SELECT age, count(*) FROM users GROUP BY age ORDER BY age ASC');
+----
+25	2
+30	2
+35	1
+
+query I
+PRAGMA lpts_check('SELECT age, count(*) FROM users GROUP BY age ORDER BY age ASC');
+----
+true
+
+# --- ORDER BY on empty table: no rows ---
+
+statement ok
+CREATE TABLE empty_tbl (x INTEGER, y VARCHAR);
+
+query II
+PRAGMA lpts_exec('SELECT x, y FROM empty_tbl ORDER BY x DESC');
+----
+
+query I
+PRAGMA lpts_check('SELECT x, y FROM empty_tbl ORDER BY x DESC');
+----
+true

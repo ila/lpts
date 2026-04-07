@@ -7,26 +7,152 @@ require lpts
 statement ok
 CREATE TABLE sales (product VARCHAR, region VARCHAR, amount INTEGER);
 
-# HAVING count(*) > n
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) > 5');
-----
-WITH scan_0 (t0_product) AS (SELECT product FROM memory.main.sales),  aggregate_1 (t2_product, t3_aggregate_0) AS (SELECT t0_product, count_star() FROM scan_0 GROUP BY t0_product),  filter_2 AS (SELECT * FROM aggregate_1 WHERE (t3_aggregate_0) > (CAST(5 AS BIGINT))),  projection_3 (t1_product, t1_aggregate_0) AS (SELECT t2_product, t3_aggregate_0 FROM filter_2) SELECT t1_product AS product, t1_aggregate_0 AS aggregate_0 FROM projection_3;
+statement ok
+INSERT INTO sales VALUES
+  ('A', 'EU', 100), ('A', 'EU', 200), ('A', 'EU', 300),
+  ('A', 'EU', 400), ('A', 'EU', 500), ('A', 'EU', 600),
+  ('B', 'US', 50),
+  ('C', 'EU', 1100),
+  ('D', 'US', 600), ('D', 'US', 600);
 
-# HAVING sum(amount) > n
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT region, sum(amount) FROM sales GROUP BY region HAVING sum(amount) > 1000');
-----
-WITH scan_0 (t0_region, t0_amount) AS (SELECT region, amount FROM memory.main.sales),  aggregate_1 (t2_region, t3_aggregate_0) AS (SELECT t0_region, sum(t0_amount) FROM scan_0 GROUP BY t0_region),  filter_2 AS (SELECT * FROM aggregate_1 WHERE (t3_aggregate_0) > (CAST(1000 AS HUGEINT))),  projection_3 (t1_region, t1_aggregate_0) AS (SELECT t2_region, t3_aggregate_0 FROM filter_2) SELECT t1_region AS region, t1_aggregate_0 AS aggregate_0 FROM projection_3;
+# --- HAVING count(*) > 5: only group with 6 rows passes ---
 
-# WHERE filters before aggregation, HAVING filters after
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT product, count(*) FROM sales WHERE amount > 100 GROUP BY product HAVING count(*) > 2');
+query II
+PRAGMA lpts_exec('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) > 5');
 ----
-WITH scan_0 (t0_amount, t0_product) AS (SELECT amount, product FROM memory.main.sales),  filter_1 AS (SELECT * FROM scan_0 WHERE (t0_amount) > (CAST(100 AS INTEGER))),  aggregate_2 (t2_product, t3_aggregate_0) AS (SELECT t0_product, count_star() FROM filter_1 GROUP BY t0_product),  filter_3 AS (SELECT * FROM aggregate_2 WHERE (t3_aggregate_0) > (CAST(2 AS BIGINT))),  projection_4 (t1_product, t1_aggregate_0) AS (SELECT t2_product, t3_aggregate_0 FROM filter_3) SELECT t1_product AS product, t1_aggregate_0 AS aggregate_0 FROM projection_4;
+A	6
 
-# WHERE on a string column + HAVING on sum
 query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT region, sum(amount) FROM sales WHERE region = ''EU'' GROUP BY region HAVING sum(amount) > 500');
+PRAGMA lpts_check('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) > 5');
 ----
-WITH scan_0 (t0_region, t0_amount) AS (SELECT region, amount FROM memory.main.sales),  filter_1 AS (SELECT * FROM scan_0 WHERE (t0_region) = (CAST('EU' AS VARCHAR))),  aggregate_2 (t2_region, t3_aggregate_0) AS (SELECT t0_region, sum(t0_amount) FROM filter_1 GROUP BY t0_region),  filter_3 AS (SELECT * FROM aggregate_2 WHERE (t3_aggregate_0) > (CAST(500 AS HUGEINT))),  projection_4 (t1_region, t1_aggregate_0) AS (SELECT t2_region, t3_aggregate_0 FROM filter_3) SELECT t1_region AS region, t1_aggregate_0 AS aggregate_0 FROM projection_4;
+true
+
+# --- HAVING count(*) > 1: multiple groups pass ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) > 1');
+----
+A	6
+D	2
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) > 1');
+----
+true
+
+# --- HAVING sum(amount) > threshold ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT region, sum(amount) FROM sales GROUP BY region HAVING sum(amount) > 200');
+----
+EU	3200
+US	1250
+
+query I
+PRAGMA lpts_check('SELECT region, sum(amount) FROM sales GROUP BY region HAVING sum(amount) > 200');
+----
+true
+
+# --- HAVING with equality: exactly equal to a value ---
+
+query II
+PRAGMA lpts_exec('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) = 2');
+----
+D	2
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) = 2');
+----
+true
+
+# --- HAVING that matches no group: empty result ---
+
+query II
+PRAGMA lpts_exec('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) > 100');
+----
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM sales GROUP BY product HAVING count(*) > 100');
+----
+true
+
+# --- WHERE before aggregation, HAVING after: independent filtering stages ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT product, count(*) FROM sales WHERE amount > 100 GROUP BY product HAVING count(*) > 2');
+----
+A	5
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM sales WHERE amount > 100 GROUP BY product HAVING count(*) > 2');
+----
+true
+
+# --- WHERE on string column + HAVING on sum ---
+
+query II
+PRAGMA lpts_exec('SELECT region, sum(amount) FROM sales WHERE region = ''EU'' GROUP BY region HAVING sum(amount) > 500');
+----
+EU	3200
+
+query I
+PRAGMA lpts_check('SELECT region, sum(amount) FROM sales WHERE region = ''EU'' GROUP BY region HAVING sum(amount) > 500');
+----
+true
+
+# --- WHERE eliminates all rows before grouping: no groups reach HAVING ---
+
+query II
+PRAGMA lpts_exec('SELECT product, count(*) FROM sales WHERE amount > 99999 GROUP BY product HAVING count(*) > 0');
+----
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM sales WHERE amount > 99999 GROUP BY product HAVING count(*) > 0');
+----
+true
+
+# --- HAVING min/max: filter groups by their minimum value ---
+
+query I
+PRAGMA lpts_check('SELECT product, min(amount) FROM sales GROUP BY product HAVING min(amount) > 100');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT product, max(amount) FROM sales GROUP BY product HAVING max(amount) < 1000');
+----
+true
+
+# --- HAVING avg: filter groups by average ---
+
+query I
+PRAGMA lpts_check('SELECT product, avg(amount) FROM sales GROUP BY product HAVING avg(amount) > 100');
+----
+true
+
+# --- Multi-column GROUP BY with HAVING ---
+
+query III rowsort
+PRAGMA lpts_exec('SELECT product, region, count(*) FROM sales GROUP BY product, region HAVING count(*) >= 2');
+----
+A	EU	6
+D	US	2
+
+query I
+PRAGMA lpts_check('SELECT product, region, count(*) FROM sales GROUP BY product, region HAVING count(*) >= 2');
+----
+true
+
+# --- HAVING on empty table: no groups, no output ---
+
+statement ok
+CREATE TABLE empty_sales (product VARCHAR, amount INTEGER);
+
+query II
+PRAGMA lpts_exec('SELECT product, count(*) FROM empty_sales GROUP BY product HAVING count(*) > 0');
+----
+
+query I
+PRAGMA lpts_check('SELECT product, count(*) FROM empty_sales GROUP BY product HAVING count(*) > 0');
+----
+true

@@ -8,3 +8,4 @@ test/python/__pycache__/
 .Rhistory
 test.db.wal
 test.db
+tpch-umbra-flat-cte-list.txt

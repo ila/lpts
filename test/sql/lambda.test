@@ -7,35 +7,140 @@ require lpts
 statement ok
 CREATE TABLE items (id INT, grp INT, val FLOAT[]);
 
-# list_transform with single-param lambda
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT grp, list_transform(val, lambda x: x + 1.0) FROM items');
+statement ok
+INSERT INTO items VALUES
+  (1, 1, [1.0, 2.0, 3.0]),
+  (2, 1, [4.0, 5.0]),
+  (3, 2, [10.0, 20.0]),
+  (4, 2, [7.0]),
+  (5, 3, []);
+
+# --- list_transform: add scalar to each element ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT grp, list_transform(val, lambda x: x + 1.0) FROM items');
 ----
-WITH scan_0 (t0_grp, t0_val) AS (SELECT grp, val FROM memory.main.items),  projection_1 (t1_grp, t1_scalar_1) AS (SELECT t0_grp, list_transform(t0_val, lambda x: (x + CAST(1.0 AS FLOAT))) FROM scan_0) SELECT t1_grp AS grp, t1_scalar_1 AS scalar_1 FROM projection_1;
+1	[2.0, 3.0, 4.0]
+1	[5.0, 6.0]
+2	[11.0, 21.0]
+2	[8.0]
+3	[]
 
 query I
 PRAGMA lpts_check('SELECT grp, list_transform(val, lambda x: x + 1.0) FROM items');
 ----
 true
 
-# list_filter with lambda (comparison in body)
+# --- list_transform: multiply by scalar ---
+
 query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT grp, list_filter(val, lambda x: x > 5.0) FROM items');
+PRAGMA lpts_check('SELECT grp, list_transform(val, lambda x: x * 2.0) FROM items');
 ----
-WITH scan_0 (t0_grp, t0_val) AS (SELECT grp, val FROM memory.main.items),  projection_1 (t1_grp, t1_scalar_1) AS (SELECT t0_grp, list_filter(t0_val, lambda x: (x) > (CAST(5.0 AS FLOAT))) FROM scan_0) SELECT t1_grp AS grp, t1_scalar_1 AS scalar_1 FROM projection_1;
+true
+
+# --- list_transform on single-element list ---
+
+query II
+PRAGMA lpts_exec('SELECT id, list_transform(val, lambda x: x + 10.0) FROM items WHERE id = 4');
+----
+4	[17.0]
+
+query I
+PRAGMA lpts_check('SELECT id, list_transform(val, lambda x: x + 10.0) FROM items WHERE id = 4');
+----
+true
+
+# --- list_transform on empty list: returns empty list ---
+
+query II
+PRAGMA lpts_exec('SELECT id, list_transform(val, lambda x: x + 1.0) FROM items WHERE id = 5');
+----
+5	[]
+
+query I
+PRAGMA lpts_check('SELECT id, list_transform(val, lambda x: x + 1.0) FROM items WHERE id = 5');
+----
+true
+
+# --- list_filter: retain elements matching condition ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT grp, list_filter(val, lambda x: x > 5.0) FROM items');
+----
+1	[]
+1	[]
+2	[10.0, 20.0]
+2	[7.0]
+3	[]
 
 query I
 PRAGMA lpts_check('SELECT grp, list_filter(val, lambda x: x > 5.0) FROM items');
 ----
 true
 
-# list_reduce with two-param lambda and nested list_transform lambda
+# --- list_filter: condition retains all elements ---
+
 query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT grp, list_reduce(list(val), lambda a, b: list_transform(list_zip(a, b), lambda x: x[1] + x[2])) AS total FROM items GROUP BY grp');
+PRAGMA lpts_check('SELECT list_filter(val, lambda x: x >= 0.0) FROM items');
 ----
-WITH scan_0 (t0_grp, t0_val) AS (SELECT grp, val FROM memory.main.items),  aggregate_1 (t2_grp, t3_aggregate_0) AS (SELECT t0_grp, list(t0_val) FROM scan_0 GROUP BY t0_grp),  projection_2 (t1_grp, t1_total) AS (SELECT t2_grp, list_reduce(t3_aggregate_0, lambda a, b: list_transform(list_zip(a, b), lambda x: (array_extract(x, CAST(1 AS BIGINT)) + array_extract(x, CAST(2 AS BIGINT))))) FROM aggregate_1) SELECT t1_grp AS grp, t1_total AS total FROM projection_2;
+true
+
+# --- list_filter: condition retains no elements ---
+
+query I
+PRAGMA lpts_check('SELECT list_filter(val, lambda x: x > 999.0) FROM items');
+----
+true
+
+# --- list_filter on empty list: returns empty list ---
+
+query II
+PRAGMA lpts_exec('SELECT id, list_filter(val, lambda x: x > 0.0) FROM items WHERE id = 5');
+----
+5	[]
+
+query I
+PRAGMA lpts_check('SELECT id, list_filter(val, lambda x: x > 0.0) FROM items WHERE id = 5');
+----
+true
+
+# --- list_transform with compound body expression ---
+
+query I
+PRAGMA lpts_check('SELECT list_transform(val, lambda x: x * x) FROM items');
+----
+true
+
+# --- list_reduce with two-param lambda: element-wise sum across rows in a group ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT grp, list_reduce(list(val), lambda a, b: list_transform(list_zip(a, b), lambda x: x[1] + x[2])) AS total FROM items GROUP BY grp');
+----
+1	[5.0, 7.0, NULL]
+2	[17.0, NULL]
+3	[]
 
 query I
 PRAGMA lpts_check('SELECT grp, list_reduce(list(val), lambda a, b: list_transform(list_zip(a, b), lambda x: x[1] + x[2])) AS total FROM items GROUP BY grp');
+----
+true
+
+# --- list_transform combined with WHERE filter ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, list_transform(val, lambda x: x + 1.0) FROM items WHERE grp = 2');
+----
+3	[11.0, 21.0]
+4	[8.0]
+
+query I
+PRAGMA lpts_check('SELECT id, list_transform(val, lambda x: x + 1.0) FROM items WHERE grp = 2');
+----
+true
+
+# --- Lambda in aggregate context: list() + list_transform ---
+
+query I
+PRAGMA lpts_check('SELECT grp, list_transform(list(id), lambda x: x + 100) FROM items GROUP BY grp');
 ----
 true

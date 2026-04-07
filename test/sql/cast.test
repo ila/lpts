@@ -7,20 +7,161 @@ require lpts
 statement ok
 CREATE TABLE nums (val VARCHAR, n INTEGER);
 
-# CAST in projection — CAST(val AS INTEGER) appears in the SELECT expression
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT CAST(val AS INTEGER) FROM nums');
-----
-WITH scan_0 (t0_val) AS (SELECT val FROM memory.main.nums),  projection_1 (t1_scalar_0) AS (SELECT CAST(t0_val AS INTEGER) FROM scan_0) SELECT t1_scalar_0 AS scalar_0 FROM projection_1;
+statement ok
+INSERT INTO nums VALUES ('42', 1), ('7', 2), ('100', 3), ('-5', 4);
 
-# CAST in WHERE filter — CAST(val AS INTEGER) used in comparison condition
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT n FROM nums WHERE CAST(val AS INTEGER) > 10');
-----
-WITH scan_0 (t0_val, t0_n) AS (SELECT val, n FROM memory.main.nums),  filter_1 AS (SELECT * FROM scan_0 WHERE (CAST(t0_val AS INTEGER)) > (CAST(10 AS INTEGER))),  projection_2 (t1_n) AS (SELECT t0_n FROM filter_1) SELECT t1_n AS n FROM projection_2;
+# --- CAST in projection: VARCHAR → INTEGER ---
 
-# TRY_CAST — returns NULL instead of throwing on failure; emitted as TRY_CAST(...)
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT TRY_CAST(val AS DOUBLE) FROM nums');
+query I rowsort
+PRAGMA lpts_exec('SELECT CAST(val AS INTEGER) FROM nums');
 ----
-WITH scan_0 (t0_val) AS (SELECT val FROM memory.main.nums),  projection_1 (t1_scalar_0) AS (SELECT TRY_CAST(t0_val AS DOUBLE) FROM scan_0) SELECT t1_scalar_0 AS scalar_0 FROM projection_1;
+-5
+100
+42
+7
+
+query I
+PRAGMA lpts_check('SELECT CAST(val AS INTEGER) FROM nums');
+----
+true
+
+# --- CAST in projection: INTEGER → VARCHAR ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT CAST(n AS VARCHAR) FROM nums');
+----
+1
+2
+3
+4
+
+query I
+PRAGMA lpts_check('SELECT CAST(n AS VARCHAR) FROM nums');
+----
+true
+
+# --- CAST in projection: VARCHAR → BIGINT ---
+
+query I
+PRAGMA lpts_check('SELECT CAST(val AS BIGINT) FROM nums');
+----
+true
+
+# --- CAST in projection: VARCHAR → DOUBLE ---
+
+query I
+PRAGMA lpts_check('SELECT CAST(val AS DOUBLE) FROM nums');
+----
+true
+
+# --- CAST in WHERE filter: comparison on cast value ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT val, n FROM nums WHERE CAST(val AS INTEGER) > 10');
+----
+100	3
+42	1
+
+query I
+PRAGMA lpts_check('SELECT val, n FROM nums WHERE CAST(val AS INTEGER) > 10');
+----
+true
+
+# --- CAST filter with negative values ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT val, n FROM nums WHERE CAST(val AS INTEGER) < 0');
+----
+-5	4
+
+query I
+PRAGMA lpts_check('SELECT val, n FROM nums WHERE CAST(val AS INTEGER) < 0');
+----
+true
+
+# --- CAST used in both projection and filter ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT CAST(val AS INTEGER) FROM nums WHERE CAST(val AS INTEGER) >= 7');
+----
+100
+42
+7
+
+query I
+PRAGMA lpts_check('SELECT CAST(val AS INTEGER) FROM nums WHERE CAST(val AS INTEGER) >= 7');
+----
+true
+
+# --- TRY_CAST: successful conversion returns the value ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT TRY_CAST(val AS DOUBLE) FROM nums');
+----
+-5.0
+100.0
+42.0
+7.0
+
+query I
+PRAGMA lpts_check('SELECT TRY_CAST(val AS DOUBLE) FROM nums');
+----
+true
+
+# --- TRY_CAST: invalid conversion returns NULL instead of throwing ---
+
+statement ok
+CREATE TABLE mixed_vals (raw VARCHAR);
+
+statement ok
+INSERT INTO mixed_vals VALUES ('123'), ('not_a_number'), ('456'), (NULL);
+
+query I rowsort
+PRAGMA lpts_exec('SELECT TRY_CAST(raw AS INTEGER) FROM mixed_vals');
+----
+123
+456
+NULL
+NULL
+
+query I
+PRAGMA lpts_check('SELECT TRY_CAST(raw AS INTEGER) FROM mixed_vals');
+----
+true
+
+# --- TRY_CAST in WHERE filter: NULLs from failed casts are excluded ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT raw FROM mixed_vals WHERE TRY_CAST(raw AS INTEGER) > 200');
+----
+456
+
+query I
+PRAGMA lpts_check('SELECT raw FROM mixed_vals WHERE TRY_CAST(raw AS INTEGER) > 200');
+----
+true
+
+# --- CAST on NULL input produces NULL ---
+
+statement ok
+CREATE TABLE null_cast (val VARCHAR);
+
+statement ok
+INSERT INTO null_cast VALUES (NULL);
+
+query I
+PRAGMA lpts_exec('SELECT CAST(val AS INTEGER) FROM null_cast');
+----
+NULL
+
+query I
+PRAGMA lpts_check('SELECT CAST(val AS INTEGER) FROM null_cast');
+----
+true
+
+# --- Nested CAST: CAST(CAST(val AS INTEGER) AS VARCHAR) ---
+
+query I
+PRAGMA lpts_check('SELECT CAST(CAST(val AS INTEGER) AS VARCHAR) FROM nums');
+----
+true

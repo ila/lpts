@@ -10,80 +10,174 @@ CREATE TABLE users (id INTEGER, name VARCHAR);
 statement ok
 CREATE TABLE orders (id INTEGER, user_id INTEGER, amount DECIMAL);
 
-# Inner join
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
+statement ok
+INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
+
+statement ok
+INSERT INTO orders VALUES (1, 1, 100.0), (2, 1, 200.0), (3, 2, 150.0);
+
+# --- INNER JOIN: only rows with matches on both sides ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
 ----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT t0_id, t0_name, t1_user_id, t1_amount FROM scan_0 INNER JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
+Alice	100.0
+Alice	200.0
+Bob	150.0
 
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
 ----
 true
 
-# Left join
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT u.name, o.amount FROM users u LEFT JOIN orders o ON u.id = o.user_id');
+# --- INNER JOIN with filter: WHERE applied after join ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id WHERE o.amount > 100');
 ----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT t0_id, t0_name, t1_user_id, t1_amount FROM scan_0 LEFT JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
+Alice	200.0
+Bob	150.0
+
+query I
+PRAGMA lpts_check('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id WHERE o.amount > 100');
+----
+true
+
+# --- LEFT JOIN: all left rows kept; Carol has no orders so amount is NULL ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT u.name, o.amount FROM users u LEFT JOIN orders o ON u.id = o.user_id');
+----
+Alice	100.0
+Alice	200.0
+Bob	150.0
+Carol	NULL
 
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u LEFT JOIN orders o ON u.id = o.user_id');
 ----
 true
 
-# Right join (DuckDB rewrites to flipped LEFT JOIN internally)
+# --- LEFT JOIN with IS NULL: find users with no orders ---
+
 query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT u.name, o.amount FROM users u RIGHT JOIN orders o ON u.id = o.user_id');
+PRAGMA lpts_exec('SELECT u.name FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE o.id IS NULL');
 ----
-WITH scan_0 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  scan_1 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  join_2 (t1_user_id, t1_amount, t0_id, t0_name) AS (SELECT t1_user_id, t1_amount, t0_id, t0_name FROM scan_0 LEFT JOIN scan_1 ON (t1_user_id = t0_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
+Carol
+
+query I
+PRAGMA lpts_check('SELECT u.name FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE o.id IS NULL');
+----
+true
+
+# --- RIGHT JOIN: DuckDB rewrites internally; all order rows kept ---
 
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u RIGHT JOIN orders o ON u.id = o.user_id');
 ----
 true
 
-# Full outer join
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT u.name, o.amount FROM users u FULL OUTER JOIN orders o ON u.id = o.user_id');
-----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  scan_1 (t1_user_id, t1_amount) AS (SELECT user_id, amount FROM memory.main.orders),  join_2 (t0_id, t0_name, t1_user_id, t1_amount) AS (SELECT t0_id, t0_name, t1_user_id, t1_amount FROM scan_0 FULL JOIN scan_1 ON (t0_id = t1_user_id)),  projection_3 (t2_name, t2_amount) AS (SELECT t0_name, t1_amount FROM join_2) SELECT t2_name AS name, t2_amount AS amount FROM projection_3;
+# --- FULL OUTER JOIN: all rows from both sides ---
 
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u FULL OUTER JOIN orders o ON u.id = o.user_id');
 ----
 true
 
-# Join with computed expressions (verifies column alignment with same-name join keys)
+# --- JOIN with computed expression in projection ---
+
 statement ok
 CREATE TABLE staff (id INTEGER, dept VARCHAR, salary INTEGER);
 
 statement ok
 CREATE TABLE bonus (dept VARCHAR, amount INTEGER);
 
+statement ok
+INSERT INTO staff VALUES (1, 'eng', 50000), (2, 'sales', 60000), (3, 'eng', 55000);
+
+statement ok
+INSERT INTO bonus VALUES ('eng', 5000), ('sales', 6000);
+
+query II rowsort
+PRAGMA lpts_exec('SELECT s.id, s.salary + b.amount FROM staff s JOIN bonus b ON s.dept = b.dept');
+----
+1	55000
+2	66000
+3	60000
+
 query I
 PRAGMA lpts_check('SELECT s.id, s.salary + b.amount FROM staff s JOIN bonus b ON s.dept = b.dept');
 ----
 true
 
-# Union all
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users UNION ALL SELECT id, name FROM users');
+# --- JOIN on string column ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT s.dept, s.salary FROM staff s JOIN bonus b ON s.dept = b.dept');
 ----
-WITH scan_0 (t1_id, t1_name) AS (SELECT id, name FROM memory.main.users),  projection_1 (t2_id, t2_name) AS (SELECT t1_id, t1_name FROM scan_0),  scan_2 (t8_id, t8_name) AS (SELECT id, name FROM memory.main.users),  projection_3 (t9_id, t9_name) AS (SELECT t8_id, t8_name FROM scan_2),  union_4 (t0_id, t0_name) AS (SELECT * FROM projection_1 UNION ALL SELECT * FROM projection_3) SELECT t0_id AS id, t0_name AS name FROM union_4;
+eng	50000
+eng	55000
+sales	60000
 
 query I
-PRAGMA lpts_check('SELECT id, name FROM users UNION ALL SELECT id, name FROM users');
+PRAGMA lpts_check('SELECT s.dept, s.salary FROM staff s JOIN bonus b ON s.dept = b.dept');
 ----
 true
 
-# CROSS JOIN / CROSS PRODUCT
+# --- JOIN with GROUP BY on joined result ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT s.dept, sum(s.salary) FROM staff s JOIN bonus b ON s.dept = b.dept GROUP BY s.dept');
+----
+eng	105000
+sales	60000
+
+query I
+PRAGMA lpts_check('SELECT s.dept, sum(s.salary) FROM staff s JOIN bonus b ON s.dept = b.dept GROUP BY s.dept');
+----
+true
+
+# --- Self-join: join a table with itself ---
+
+query I
+PRAGMA lpts_check('SELECT a.name, b.name FROM users a JOIN users b ON a.id != b.id AND a.id < b.id');
+----
+true
+
+# --- CROSS JOIN: Cartesian product ---
+
 query I
 PRAGMA lpts_check('SELECT u.name, o.amount FROM users u CROSS JOIN orders o');
 ----
 true
 
+# --- Implicit join syntax (comma): equivalent to CROSS JOIN ---
+
 query I
 PRAGMA lpts_check('SELECT u.name, s.salary FROM users u, staff s');
+----
+true
+
+# --- Three-way JOIN ---
+
+query I
+PRAGMA lpts_check('SELECT u.name, o.amount, s.salary FROM users u JOIN orders o ON u.id = o.user_id JOIN staff s ON u.id = s.id');
+----
+true
+
+# --- UNION ALL of two JOIN results ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id UNION ALL SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
+----
+Alice	100.0
+Alice	100.0
+Alice	200.0
+Alice	200.0
+Bob	150.0
+Bob	150.0
+
+query I
+PRAGMA lpts_check('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id UNION ALL SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
 ----
 true

@@ -17,6 +17,8 @@
 #include "lpts_helpers.hpp"
 #include "lpts_debug.hpp"
 
+#include <set>
+
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -45,6 +47,7 @@
 #include "duckdb/planner/operator/logical_set_operation.hpp"
 #include "duckdb/planner/expression/bound_lambda_expression.hpp"
 #include "duckdb/planner/expression/bound_lambdaref_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/function/lambda_functions.hpp"
@@ -153,7 +156,7 @@ string FilterNode::ToQuery() {
 	get_str << child_cte_name;
 	if (!conditions.empty()) {
 		get_str << " WHERE ";
-		get_str << VecToSeparatedList(conditions);
+		get_str << VecToSeparatedList(conditions, " AND ");
 	}
 	return get_str.str();
 }
@@ -324,7 +327,7 @@ static void CollectLambdaParamNames(const Expression &expr, std::map<idx_t, stri
 	// For nested lambda functions, only recurse into children (not bind_info)
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 		auto &func = expr.Cast<BoundFunctionExpression>();
-		if (func.function.HasBindLambdaCallback()) {
+		if (func.function.bind_lambda != nullptr) {
 			for (auto &child : func.children) {
 				CollectLambdaParamNames(*child, names);
 			}
@@ -386,7 +389,7 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 		}
 		// For lambda functions, only serialize non-lambda, non-capture children
 		idx_t child_count = func_expr.children.size();
-		if (func_expr.function.HasBindLambdaCallback()) {
+		if (func_expr.function.bind_lambda != nullptr) {
 			child_count = 0;
 			for (auto &arg_type : func_expr.function.arguments) {
 				if (arg_type.id() != LogicalTypeId::LAMBDA) {
@@ -413,7 +416,7 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 				expr_str << ExpressionToAliasedString(func_expr.children[i]);
 			}
 			// Lambda function: serialize the lambda expression from bind_info
-			if (func_expr.function.HasBindLambdaCallback() && func_expr.bind_info) {
+			if (func_expr.function.bind_lambda != nullptr && func_expr.bind_info) {
 				auto &bind_data = func_expr.bind_info->Cast<ListLambdaBindData>();
 				if (bind_data.lambda_expr) {
 					if (child_count > 0) {
@@ -482,6 +485,56 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 			expr_str << " ELSE " << ExpressionToAliasedString(case_expr.else_expr);
 		}
 		expr_str << " END";
+		break;
+	}
+	case (ExpressionClass::BOUND_OPERATOR): {
+		const BoundOperatorExpression &op_expr = expression->Cast<BoundOperatorExpression>();
+		switch (op_expr.GetExpressionType()) {
+		case ExpressionType::OPERATOR_IS_NULL:
+			expr_str << "(" << ExpressionToAliasedString(op_expr.children[0]) << ") IS NULL";
+			break;
+		case ExpressionType::OPERATOR_IS_NOT_NULL:
+			expr_str << "(" << ExpressionToAliasedString(op_expr.children[0]) << ") IS NOT NULL";
+			break;
+		case ExpressionType::OPERATOR_NOT:
+			expr_str << "NOT (" << ExpressionToAliasedString(op_expr.children[0]) << ")";
+			break;
+		case ExpressionType::COMPARE_IN:
+		case ExpressionType::COMPARE_NOT_IN: {
+			const bool is_not_in = op_expr.GetExpressionType() == ExpressionType::COMPARE_NOT_IN;
+			expr_str << "(" << ExpressionToAliasedString(op_expr.children[0]) << ")";
+			expr_str << (is_not_in ? " NOT IN (" : " IN (");
+			for (idx_t i = 1; i < op_expr.children.size(); i++) {
+				if (i > 1) {
+					expr_str << ", ";
+				}
+				expr_str << ExpressionToAliasedString(op_expr.children[i]);
+			}
+			expr_str << ")";
+			break;
+		}
+		case ExpressionType::OPERATOR_COALESCE: {
+			expr_str << "COALESCE(";
+			for (idx_t i = 0; i < op_expr.children.size(); i++) {
+				if (i > 0) {
+					expr_str << ", ";
+				}
+				expr_str << ExpressionToAliasedString(op_expr.children[i]);
+			}
+			expr_str << ")";
+			break;
+		}
+		case ExpressionType::OPERATOR_NULLIF:
+			expr_str << "NULLIF(" << ExpressionToAliasedString(op_expr.children[0]) << ", "
+			         << ExpressionToAliasedString(op_expr.children[1]) << ")";
+			break;
+		case ExpressionType::OPERATOR_TRY:
+			expr_str << "TRY(" << ExpressionToAliasedString(op_expr.children[0]) << ")";
+			break;
+		default:
+			throw NotImplementedException("Unsupported BOUND_OPERATOR subtype for ExpressionToAliasedString: %s",
+			                              ExpressionTypeToString(op_expr.GetExpressionType()));
+		}
 		break;
 	}
 	default: {
@@ -607,6 +660,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 
 		vector<string> column_names;
 		vector<string> cte_column_names;
+		std::set<string> used_cte_names;
 		for (size_t i = 0; i < plan_as_projection.expressions.size(); ++i) {
 			const unique_ptr<Expression> &expression = plan_as_projection.expressions[i];
 			const ColumnBinding new_cb = ColumnBinding(table_index, i);
@@ -616,7 +670,17 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 				column_names.push_back(descendant_col_struct->ToUniqueColumnName());
 				auto new_col_struct =
 				    make_uniq<ColStruct>(table_index, descendant_col_struct->column_name, descendant_col_struct->alias);
-				cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
+				string cte_name = new_col_struct->ToUniqueColumnName();
+				// De-duplicate: if name already used in this projection, append column index
+				if (used_cte_names.count(cte_name)) {
+					string dedup_alias = (descendant_col_struct->alias.empty() ? descendant_col_struct->column_name
+					                                                           : descendant_col_struct->alias) +
+					                     "_" + std::to_string(i);
+					new_col_struct = make_uniq<ColStruct>(table_index, descendant_col_struct->column_name, dedup_alias);
+					cte_name = new_col_struct->ToUniqueColumnName();
+				}
+				used_cte_names.insert(cte_name);
+				cte_column_names.push_back(cte_name);
 				column_map[new_cb] = std::move(new_col_struct);
 			} else {
 				string expr_str = ExpressionToAliasedString(expression);
@@ -625,7 +689,14 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 				// (DuckDB may assign the same alias to multiple expressions)
 				string scalar_alias = "scalar_" + std::to_string(i);
 				auto new_col_struct = make_uniq<ColStruct>(table_index, expr_str, scalar_alias);
-				cte_column_names.push_back(new_col_struct->ToUniqueColumnName());
+				string cte_name = new_col_struct->ToUniqueColumnName();
+				if (used_cte_names.count(cte_name)) {
+					scalar_alias = "scalar_" + std::to_string(i) + "_dup";
+					new_col_struct = make_uniq<ColStruct>(table_index, expr_str, scalar_alias);
+					cte_name = new_col_struct->ToUniqueColumnName();
+				}
+				used_cte_names.insert(cte_name);
+				cte_column_names.push_back(cte_name);
 				column_map[new_cb] = std::move(new_col_struct);
 			}
 		}
@@ -817,14 +888,18 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		string limit_str;
 		if (limit_op.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
 			limit_str = std::to_string(limit_op.limit_val.GetConstantValue());
+		} else if (limit_op.limit_val.Type() == LimitNodeType::EXPRESSION_VALUE) {
+			limit_str = ExpressionToAliasedString(const_cast<BoundLimitNode &>(limit_op.limit_val).GetExpression());
 		} else if (limit_op.limit_val.Type() != LimitNodeType::UNSET) {
-			throw NotImplementedException("LPTS: only constant LIMIT values are supported");
+			throw NotImplementedException("LPTS: unsupported LIMIT node type");
 		}
 		string offset_str;
 		if (limit_op.offset_val.Type() == LimitNodeType::CONSTANT_VALUE) {
 			offset_str = std::to_string(limit_op.offset_val.GetConstantValue());
+		} else if (limit_op.offset_val.Type() == LimitNodeType::EXPRESSION_VALUE) {
+			offset_str = ExpressionToAliasedString(const_cast<BoundLimitNode &>(limit_op.offset_val).GetExpression());
 		} else if (limit_op.offset_val.Type() != LimitNodeType::UNSET) {
-			throw NotImplementedException("LPTS: only constant OFFSET values are supported");
+			throw NotImplementedException("LPTS: unsupported OFFSET node type");
 		}
 		vector<string> cte_column_names;
 		for (const ColumnBinding &cb : subplan->GetColumnBindings()) {

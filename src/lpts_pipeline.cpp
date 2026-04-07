@@ -344,7 +344,7 @@ private:
 		case LogicalOperatorType::LOGICAL_GET: {
 			const LogicalGet &get = op->Cast<LogicalGet>();
 			auto catalog_entry = get.GetTable();
-			const size_t table_index = get.table_index;
+			const idx_t table_index = get.table_index;
 			const string catalog_name = get.GetTable()->schema.ParentCatalog().GetName();
 			const string schema_name = catalog_entry->schema.name;
 			const string table_name = catalog_entry.get()->name;
@@ -374,8 +374,8 @@ private:
 
 			// Pushdown table filters (rare, but present in some plans).
 			if (!get.table_filters.filters.empty()) {
-				for (auto &filter : get.table_filters.filters) {
-					table_filters.push_back(filter.second->ToString(get.names[filter.first]));
+				for (auto &entry : get.table_filters.filters) {
+					table_filters.push_back(entry.second->ToString(get.names[entry.first]));
 				}
 			}
 
@@ -396,7 +396,7 @@ private:
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_PROJECTION: {
 			const LogicalProjection &proj = op->Cast<LogicalProjection>();
-			const size_t table_index = proj.table_index;
+			const idx_t table_index = proj.table_index;
 			vector<string> expressions;
 			vector<string> cte_column_names;
 			unordered_set<string> seen_names;
@@ -409,7 +409,7 @@ private:
 					BoundColumnRefExpression &bcr = expr->Cast<BoundColumnRefExpression>();
 					unique_ptr<ColStruct> &desc = column_map.at(MappableColumnBinding(bcr.binding));
 					expressions.push_back(desc->ToUniqueColumnName());
-				string col_name = desc->column_name;
+					string col_name = desc->column_name;
 					string alias = desc->alias;
 					// Deduplicate: joins can produce same-named columns from different tables.
 					// Build unique CTE column name; append _N suffix on collision.
@@ -536,7 +536,7 @@ private:
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_UNION: {
 			const LogicalSetOperation &set_op = op->Cast<LogicalSetOperation>();
-			const size_t table_index = set_op.table_index;
+			const idx_t table_index = set_op.table_index;
 			vector<string> cte_column_names;
 			const auto &lhs_bindings = op->children[0]->GetColumnBindings();
 			const auto &union_bindings = op->GetColumnBindings();

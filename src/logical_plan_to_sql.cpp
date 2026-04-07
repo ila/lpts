@@ -585,7 +585,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		                 " names.size()=" + std::to_string(plan_as_get.names.size()));
 		auto catalog_entry = plan_as_get.GetTable();
 		LPTS_DEBUG_PRINT("[LPTS] GET: catalog_entry=" + string(catalog_entry ? "valid" : "null"));
-		size_t table_index = plan_as_get.table_index;
+		const idx_t table_index = plan_as_get.table_index;
 		string table_name;
 		string catalog_name;
 		string schema_name;
@@ -641,8 +641,8 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 			column_map[cb] = std::move(col_struct);
 		}
 		if (!plan_as_get.table_filters.filters.empty()) {
-			for (auto &filter : plan_as_get.table_filters.filters) {
-				filters.push_back(filter.second->ToString(plan_as_get.names[filter.first]));
+			for (auto &entry : plan_as_get.table_filters.filters) {
+				filters.push_back(entry.second->ToString(plan_as_get.names[entry.first]));
 			}
 		}
 		return make_uniq<GetNode>(my_index, std::move(cte_column_names), std::move(catalog_name),
@@ -661,7 +661,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
 		// PROJECTION = column selection and computed expressions.
 		const LogicalProjection &plan_as_projection = subplan->Cast<LogicalProjection>();
-		const size_t table_index = plan_as_projection.table_index;
+		const idx_t table_index = plan_as_projection.table_index;
 
 		vector<string> column_names;
 		vector<string> cte_column_names;
@@ -673,7 +673,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 				BoundColumnRefExpression &bcr = expression->Cast<BoundColumnRefExpression>();
 				unique_ptr<ColStruct> &descendant_col_struct = column_map.at(bcr.binding);
 				column_names.push_back(descendant_col_struct->ToUniqueColumnName());
-			string col_name = descendant_col_struct->column_name;
+				string col_name = descendant_col_struct->column_name;
 				string alias = descendant_col_struct->alias;
 				// Deduplicate: projections joining multiple tables can have same-named columns.
 				// Build unique CTE column name; append _N suffix on collision.
@@ -714,8 +714,8 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 	}
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
 		const LogicalAggregate &plan_as_aggregate = subplan->Cast<LogicalAggregate>();
-		LPTS_DEBUG_PRINT("[LPTS] AGGREGATE: group_index=" + std::to_string(plan_as_aggregate.group_index) +
-		                 " aggregate_index=" + std::to_string(plan_as_aggregate.aggregate_index) +
+		LPTS_DEBUG_PRINT("[LPTS] AGGREGATE: group_index=" + std::to_string(plan_as_aggregate.group_index.index) +
+		                 " aggregate_index=" + std::to_string(plan_as_aggregate.aggregate_index.index) +
 		                 " groups.size()=" + std::to_string(plan_as_aggregate.groups.size()) +
 		                 " expressions.size()=" + std::to_string(plan_as_aggregate.expressions.size()) +
 		                 " children_indices.size()=" + std::to_string(children_indices.size()));
@@ -792,7 +792,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 	}
 	case LogicalOperatorType::LOGICAL_UNION: {
 		const LogicalSetOperation &plan_as_union = subplan->Cast<LogicalSetOperation>();
-		const size_t table_index = plan_as_union.table_index;
+		const idx_t table_index = plan_as_union.table_index;
 		vector<string> cte_column_names;
 		const auto &union_bindings = subplan->GetColumnBindings();
 		// Derive names from the left child's finalized CTE column list, NOT from
@@ -837,7 +837,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 	}
 	case LogicalOperatorType::LOGICAL_EXCEPT: {
 		const LogicalSetOperation &plan_as_except = subplan->Cast<LogicalSetOperation>();
-		const size_t table_index = plan_as_except.table_index;
+		const idx_t table_index = plan_as_except.table_index;
 		vector<string> cte_column_names;
 		const auto &lhs_bindings = subplan->children[0]->GetColumnBindings();
 		const auto &except_bindings = subplan->GetColumnBindings();

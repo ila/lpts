@@ -144,3 +144,27 @@ query I
 PRAGMA lpts_check('SELECT id FROM users UNION ALL SELECT id FROM staff UNION ALL SELECT id FROM orders');
 ----
 true
+
+# UNION ALL with duplicate column names (tests column_map scoping)
+query I
+PRAGMA lpts_check('SELECT u.id, u.name FROM users u INNER JOIN orders o ON u.id = o.user_id UNION ALL SELECT s.id, s.dept FROM staff s INNER JOIN orders o ON s.id = o.user_id');
+----
+true
+
+# 3-way UNION ALL (N-ary, tests chaining in AstFlattener)
+query I
+PRAGMA lpts_check('SELECT id FROM users UNION ALL SELECT id FROM staff UNION ALL SELECT user_id FROM orders');
+----
+true
+
+# 4-way UNION ALL
+statement ok
+CREATE TABLE extra (val INTEGER);
+
+statement ok
+INSERT INTO extra VALUES (99);
+
+query I
+PRAGMA lpts_check('SELECT id FROM users UNION ALL SELECT id FROM staff UNION ALL SELECT user_id FROM orders UNION ALL SELECT val FROM extra');
+----
+true

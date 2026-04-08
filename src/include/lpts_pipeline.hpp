@@ -21,7 +21,9 @@ enum class SqlDialect {
 SqlDialect ParseSqlDialect(const string &value);
 
 /// Phase 1: Convert a DuckDB LogicalOperator tree into a dialect-agnostic AST.
-unique_ptr<AstNode> LogicalPlanToAst(ClientContext &context, unique_ptr<LogicalOperator> &plan);
+/// `dialect` is forwarded to expression serialization for dialect-specific function renaming.
+unique_ptr<AstNode> LogicalPlanToAst(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                     SqlDialect dialect = SqlDialect::DUCKDB);
 
 /// Phase 2: Convert an AST into a flat CTE list.
 /// `dialect` controls dialect-specific SQL rendering (default: DuckDB).

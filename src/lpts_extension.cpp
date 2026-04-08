@@ -56,8 +56,8 @@ static string LptsPragmaFunction(ClientContext &context, const FunctionParameter
 	planner.plan->Print();
 #endif
 
-	auto ast = LogicalPlanToAst(context, planner.plan);
 	SqlDialect dialect = ReadDialect(context);
+	auto ast = LogicalPlanToAst(context, planner.plan, dialect);
 	auto cte_list = AstToCteList(*ast, dialect);
 	string result_sql = cte_list->ToQuery(true);
 
@@ -100,8 +100,8 @@ static unique_ptr<FunctionData> LptsTableBind(ClientContext &context, TableFunct
 	planner.plan->Print();
 #endif
 
-	auto ast = LogicalPlanToAst(context, planner.plan);
 	SqlDialect dialect = ReadDialect(context);
+	auto ast = LogicalPlanToAst(context, planner.plan, dialect);
 	auto cte_list = AstToCteList(*ast, dialect);
 
 	auto result = make_uniq<LptsBindData>();
@@ -147,8 +147,8 @@ static string LptsExecPragmaFunction(ClientContext &context, const FunctionParam
 	Planner planner(context);
 	planner.CreatePlan(parser.statements[0]->Copy());
 
-	auto ast = LogicalPlanToAst(context, planner.plan);
 	SqlDialect dialect = ReadDialect(context);
+	auto ast = LogicalPlanToAst(context, planner.plan, dialect);
 	auto cte_list = AstToCteList(*ast, dialect);
 	return cte_list->ToQuery(true);
 }
@@ -172,8 +172,8 @@ static string LptsCheckPragmaFunction(ClientContext &context, const FunctionPara
 	Planner planner(context);
 	planner.CreatePlan(parser.statements[0]->Copy());
 
-	auto ast = LogicalPlanToAst(context, planner.plan);
 	SqlDialect dialect = ReadDialect(context);
+	auto ast = LogicalPlanToAst(context, planner.plan, dialect);
 	auto cte_list = AstToCteList(*ast, dialect);
 	string lpts_sql = cte_list->ToQuery(true);
 

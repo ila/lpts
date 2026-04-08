@@ -31,6 +31,7 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_lambda_expression.hpp"
 #include "duckdb/planner/expression/bound_lambdaref_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/function/lambda_functions.hpp"
@@ -92,6 +93,9 @@ private:
 		}
 	};
 
+	/// SQL dialect for expression serialization (function renaming, etc.)
+	SqlDialect dialect = SqlDialect::DUCKDB;
+
 	/// Global map: ColumnBinding → ColStruct.
 	/// Populated bottom-up; each operator registers its output columns here.
 	std::map<MappableColumnBinding, unique_ptr<ColStruct>> column_map;
@@ -113,7 +117,7 @@ private:
 		// For nested lambda functions, only recurse into children (not bind_info)
 		if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 			auto &func = expr.Cast<BoundFunctionExpression>();
-			if (func.function.HasBindLambdaCallback()) {
+			if (func.function.bind_lambda != nullptr) {
 				for (auto &child : func.children) {
 					CollectLambdaParamNames(*child, names);
 				}
@@ -176,9 +180,18 @@ private:
 		}
 		case ExpressionClass::BOUND_FUNCTION: {
 			const BoundFunctionExpression &func_expr = expression->Cast<BoundFunctionExpression>();
+			// Dialect-specific function name remapping.
+			string func_name = func_expr.function.name;
+			if (dialect == SqlDialect::POSTGRES) {
+				if (func_name == "strptime") {
+					func_name = "to_timestamp";
+				} else if (func_name == "strftime") {
+					func_name = "to_char";
+				}
+			}
 			// For lambda functions, only serialize non-lambda, non-capture children
 			idx_t child_count = func_expr.children.size();
-			if (func_expr.function.HasBindLambdaCallback()) {
+			if (func_expr.function.bind_lambda != nullptr) {
 				child_count = 0;
 				for (auto &arg_type : func_expr.function.arguments) {
 					if (arg_type.id() != LogicalTypeId::LAMBDA) {
@@ -193,11 +206,11 @@ private:
 			if (func_expr.is_operator && child_count == 2) {
 				expr_str << "(";
 				expr_str << ExpressionToAliasedString(func_expr.children[0]);
-				expr_str << " " << func_expr.function.name << " ";
+				expr_str << " " << func_name << " ";
 				expr_str << ExpressionToAliasedString(func_expr.children[1]);
 				expr_str << ")";
 			} else {
-				expr_str << func_expr.function.name << "(";
+				expr_str << func_name << "(";
 				for (idx_t i = 0; i < child_count; i++) {
 					if (i > 0) {
 						expr_str << ", ";
@@ -205,7 +218,7 @@ private:
 					expr_str << ExpressionToAliasedString(func_expr.children[i]);
 				}
 				// Lambda function: serialize the lambda expression from bind_info
-				if (func_expr.function.HasBindLambdaCallback() && func_expr.bind_info) {
+				if (func_expr.function.bind_lambda != nullptr && func_expr.bind_info) {
 					auto &bind_data = func_expr.bind_info->Cast<ListLambdaBindData>();
 					if (bind_data.lambda_expr) {
 						if (child_count > 0) {
@@ -261,6 +274,56 @@ private:
 			expr_str << " END";
 			break;
 		}
+		case ExpressionClass::BOUND_OPERATOR: {
+			const BoundOperatorExpression &op_expr = expression->Cast<BoundOperatorExpression>();
+			switch (op_expr.GetExpressionType()) {
+			case ExpressionType::OPERATOR_IS_NULL:
+				expr_str << "(" << ExpressionToAliasedString(op_expr.children[0]) << ") IS NULL";
+				break;
+			case ExpressionType::OPERATOR_IS_NOT_NULL:
+				expr_str << "(" << ExpressionToAliasedString(op_expr.children[0]) << ") IS NOT NULL";
+				break;
+			case ExpressionType::OPERATOR_NOT:
+				expr_str << "NOT (" << ExpressionToAliasedString(op_expr.children[0]) << ")";
+				break;
+			case ExpressionType::COMPARE_IN:
+			case ExpressionType::COMPARE_NOT_IN: {
+				const bool is_not_in = op_expr.GetExpressionType() == ExpressionType::COMPARE_NOT_IN;
+				expr_str << "(" << ExpressionToAliasedString(op_expr.children[0]) << ")";
+				expr_str << (is_not_in ? " NOT IN (" : " IN (");
+				for (idx_t i = 1; i < op_expr.children.size(); i++) {
+					if (i > 1) {
+						expr_str << ", ";
+					}
+					expr_str << ExpressionToAliasedString(op_expr.children[i]);
+				}
+				expr_str << ")";
+				break;
+			}
+			case ExpressionType::OPERATOR_COALESCE: {
+				expr_str << "COALESCE(";
+				for (idx_t i = 0; i < op_expr.children.size(); i++) {
+					if (i > 0) {
+						expr_str << ", ";
+					}
+					expr_str << ExpressionToAliasedString(op_expr.children[i]);
+				}
+				expr_str << ")";
+				break;
+			}
+			case ExpressionType::OPERATOR_NULLIF:
+				expr_str << "NULLIF(" << ExpressionToAliasedString(op_expr.children[0]) << ", "
+				         << ExpressionToAliasedString(op_expr.children[1]) << ")";
+				break;
+			case ExpressionType::OPERATOR_TRY:
+				expr_str << "TRY(" << ExpressionToAliasedString(op_expr.children[0]) << ")";
+				break;
+			default:
+				throw NotImplementedException("Unsupported BOUND_OPERATOR subtype for ExpressionToAliasedString: %s",
+				                              ExpressionTypeToString(op_expr.GetExpressionType()));
+			}
+			break;
+		}
 		default:
 			throw NotImplementedException("Unsupported expression for ExpressionToAliasedString: %s",
 			                              ExpressionTypeToString(expression->type));
@@ -281,7 +344,7 @@ private:
 		case LogicalOperatorType::LOGICAL_GET: {
 			const LogicalGet &get = op->Cast<LogicalGet>();
 			auto catalog_entry = get.GetTable();
-			const size_t table_index = get.table_index;
+			const idx_t table_index = get.table_index;
 			const string catalog_name = get.GetTable()->schema.ParentCatalog().GetName();
 			const string schema_name = catalog_entry->schema.name;
 			const string table_name = catalog_entry.get()->name;
@@ -311,8 +374,8 @@ private:
 
 			// Pushdown table filters (rare, but present in some plans).
 			if (!get.table_filters.filters.empty()) {
-				for (auto &filter : get.table_filters.filters) {
-					table_filters.push_back(filter.second->ToString(get.names[filter.first]));
+				for (auto &entry : get.table_filters.filters) {
+					table_filters.push_back(entry.second->ToString(get.names[entry.first]));
 				}
 			}
 
@@ -333,7 +396,7 @@ private:
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_PROJECTION: {
 			const LogicalProjection &proj = op->Cast<LogicalProjection>();
-			const size_t table_index = proj.table_index;
+			const idx_t table_index = proj.table_index;
 			vector<string> expressions;
 			vector<string> cte_column_names;
 			unordered_set<string> seen_names;
@@ -473,7 +536,7 @@ private:
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_UNION: {
 			const LogicalSetOperation &set_op = op->Cast<LogicalSetOperation>();
-			const size_t table_index = set_op.table_index;
+			const idx_t table_index = set_op.table_index;
 			vector<string> cte_column_names;
 			const auto &lhs_bindings = op->children[0]->GetColumnBindings();
 			const auto &union_bindings = op->GetColumnBindings();
@@ -518,14 +581,19 @@ private:
 			string limit_str;
 			if (limit_op.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
 				limit_str = std::to_string(limit_op.limit_val.GetConstantValue());
+			} else if (limit_op.limit_val.Type() == LimitNodeType::EXPRESSION_VALUE) {
+				limit_str = ExpressionToAliasedString(const_cast<BoundLimitNode &>(limit_op.limit_val).GetExpression());
 			} else if (limit_op.limit_val.Type() != LimitNodeType::UNSET) {
-				throw NotImplementedException("LPTS: only constant LIMIT values are supported");
+				throw NotImplementedException("LPTS: unsupported LIMIT node type");
 			}
 			string offset_str;
 			if (limit_op.offset_val.Type() == LimitNodeType::CONSTANT_VALUE) {
 				offset_str = std::to_string(limit_op.offset_val.GetConstantValue());
+			} else if (limit_op.offset_val.Type() == LimitNodeType::EXPRESSION_VALUE) {
+				offset_str =
+				    ExpressionToAliasedString(const_cast<BoundLimitNode &>(limit_op.offset_val).GetExpression());
 			} else if (limit_op.offset_val.Type() != LimitNodeType::UNSET) {
-				throw NotImplementedException("LPTS: only constant OFFSET values are supported");
+				throw NotImplementedException("LPTS: unsupported OFFSET node type");
 			}
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
@@ -591,7 +659,8 @@ private:
 	}
 
 public:
-	explicit AstBuilder() = default;
+	explicit AstBuilder(SqlDialect _dialect = SqlDialect::DUCKDB) : dialect(_dialect) {
+	}
 
 	/// Entry point: walk the plan and return the AST root.
 	unique_ptr<AstNode> Build(unique_ptr<LogicalOperator> &plan) {
@@ -602,8 +671,8 @@ public:
 //==============================================================================
 // Phase 1 entry point
 //==============================================================================
-unique_ptr<AstNode> LogicalPlanToAst(ClientContext &context, unique_ptr<LogicalOperator> &plan) {
-	AstBuilder builder;
+unique_ptr<AstNode> LogicalPlanToAst(ClientContext &context, unique_ptr<LogicalOperator> &plan, SqlDialect dialect) {
+	AstBuilder builder(dialect);
 	return builder.Build(plan);
 }
 

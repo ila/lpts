@@ -7,36 +7,216 @@ require lpts
 statement ok
 CREATE TABLE users (id INTEGER, name VARCHAR, age INTEGER);
 
-# Simple select all
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT * FROM users');
+statement ok
+INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Carol', 35), (4, 'Dave', 25);
+
+# --- SELECT *: all rows and columns round-trip correctly ---
+
+query III rowsort
+PRAGMA lpts_exec('SELECT * FROM users');
 ----
-WITH scan_0 (t0_id, t0_name, t0_age) AS (SELECT id, name, age FROM memory.main.users),  projection_1 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM scan_0) SELECT t1_id AS id, t1_name AS name, t1_age AS age FROM projection_1;
+1	Alice	30
+2	Bob	25
+3	Carol	35
+4	Dave	25
 
 query I
 PRAGMA lpts_check('SELECT * FROM users');
 ----
 true
 
-# Select specific columns
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT id, name FROM users');
+# --- SELECT specific columns: projection reduces column set ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, name FROM users');
 ----
-WITH scan_0 (t0_id, t0_name) AS (SELECT id, name FROM memory.main.users),  projection_1 (t1_id, t1_name) AS (SELECT t0_id, t0_name FROM scan_0) SELECT t1_id AS id, t1_name AS name FROM projection_1;
+1	Alice
+2	Bob
+3	Carol
+4	Dave
 
 query I
 PRAGMA lpts_check('SELECT id, name FROM users');
 ----
 true
 
-# Select with filter
-query I
-SELECT replace(sql, chr(10), ' ') FROM lpts_query('SELECT * FROM users WHERE age > 25');
+# --- SELECT single column ---
+
+query I rowsort
+PRAGMA lpts_exec('SELECT name FROM users');
 ----
-WITH scan_0 (t0_age, t0_id, t0_name) AS (SELECT age, id, name FROM memory.main.users),  filter_1 AS (SELECT * FROM scan_0 WHERE (t0_age) > (CAST(25 AS INTEGER))),  projection_2 (t1_id, t1_name, t1_age) AS (SELECT t0_id, t0_name, t0_age FROM filter_1) SELECT t1_id AS id, t1_name AS name, t1_age AS age FROM projection_2;
+Alice
+Bob
+Carol
+Dave
+
+query I
+PRAGMA lpts_check('SELECT name FROM users');
+----
+true
+
+# --- SELECT with equality filter: exact match ---
+
+query III
+PRAGMA lpts_exec('SELECT * FROM users WHERE id = 1');
+----
+1	Alice	30
+
+query I
+PRAGMA lpts_check('SELECT * FROM users WHERE id = 1');
+----
+true
+
+# --- SELECT with range filter (>): filters rows correctly ---
+
+query III rowsort
+PRAGMA lpts_exec('SELECT * FROM users WHERE age > 25');
+----
+1	Alice	30
+3	Carol	35
 
 query I
 PRAGMA lpts_check('SELECT * FROM users WHERE age > 25');
+----
+true
+
+# --- SELECT with >= filter: boundary value included ---
+
+query III rowsort
+PRAGMA lpts_exec('SELECT * FROM users WHERE age >= 30');
+----
+1	Alice	30
+3	Carol	35
+
+query I
+PRAGMA lpts_check('SELECT * FROM users WHERE age >= 30');
+----
+true
+
+# --- SELECT with < filter ---
+
+query III rowsort
+PRAGMA lpts_exec('SELECT * FROM users WHERE age < 30');
+----
+2	Bob	25
+4	Dave	25
+
+query I
+PRAGMA lpts_check('SELECT * FROM users WHERE age < 30');
+----
+true
+
+# --- SELECT with string equality filter ---
+
+query III
+PRAGMA lpts_exec('SELECT * FROM users WHERE name = ''Alice''');
+----
+1	Alice	30
+
+query I
+PRAGMA lpts_check('SELECT * FROM users WHERE name = ''Alice''');
+----
+true
+
+# --- SELECT with AND conjunction: both conditions must hold ---
+
+query III
+PRAGMA lpts_exec('SELECT * FROM users WHERE age > 20 AND name = ''Bob''');
+----
+2	Bob	25
+
+query I
+PRAGMA lpts_check('SELECT * FROM users WHERE age > 20 AND name = ''Bob''');
+----
+true
+
+# --- SELECT with OR conjunction: either condition sufficient ---
+
+query III rowsort
+PRAGMA lpts_exec('SELECT * FROM users WHERE name = ''Alice'' OR name = ''Carol''');
+----
+1	Alice	30
+3	Carol	35
+
+query I
+PRAGMA lpts_check('SELECT * FROM users WHERE name = ''Alice'' OR name = ''Carol''');
+----
+true
+
+# --- SELECT with filter that matches no rows: empty result ---
+
+query III
+PRAGMA lpts_exec('SELECT * FROM users WHERE age > 100');
+----
+
+query I
+PRAGMA lpts_check('SELECT * FROM users WHERE age > 100');
+----
+true
+
+# --- SELECT from empty table: zero rows ---
+
+statement ok
+CREATE TABLE empty_tbl (x INTEGER, y VARCHAR);
+
+query II
+PRAGMA lpts_exec('SELECT * FROM empty_tbl');
+----
+
+query I
+PRAGMA lpts_check('SELECT * FROM empty_tbl');
+----
+true
+
+# --- SELECT constant expression in projection ---
+
+query I
+PRAGMA lpts_check('SELECT 1 + age FROM users');
+----
+true
+
+# --- SELECT with NULL values: NULLs propagate through the plan ---
+
+statement ok
+CREATE TABLE nullable (id INTEGER, val INTEGER);
+
+statement ok
+INSERT INTO nullable VALUES (1, 10), (2, NULL), (3, 30);
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, val FROM nullable');
+----
+1	10
+2	NULL
+3	30
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM nullable');
+----
+true
+
+# --- SELECT with IS NULL filter ---
+
+query II
+PRAGMA lpts_exec('SELECT id, val FROM nullable WHERE val IS NULL');
+----
+2	NULL
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM nullable WHERE val IS NULL');
+----
+true
+
+# --- SELECT with IS NOT NULL filter ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, val FROM nullable WHERE val IS NOT NULL');
+----
+1	10
+3	30
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM nullable WHERE val IS NOT NULL');
 ----
 true
 

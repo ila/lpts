@@ -1,0 +1,70 @@
+# name: test/sql/tpch.test
+# description: TPC-H queries via lpts_check — exercises multi-table joins, aggregates, ORDER BY, LIMIT, IN, CASE WHEN
+# group: [sql]
+
+require lpts
+
+require tpch
+
+statement ok
+CALL dbgen(sf=0.01);
+
+# ============================================================
+# Q1 — single table: scan + filter + aggregate + ORDER BY
+# Operators: GET, FILTER, AGGREGATE, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT l_returnflag, l_linestatus, sum(l_quantity) AS sum_qty, count(*) AS count_order FROM lineitem WHERE l_shipdate <= CAST(''1998-09-02'' AS DATE) GROUP BY l_returnflag, l_linestatus ORDER BY l_returnflag, l_linestatus');
+----
+true
+
+# ============================================================
+# Q3 — 3-way join with GROUP BY, ORDER BY, LIMIT
+# Operators: GET, FILTER, JOIN x2, AGGREGATE, ORDER, LIMIT
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT l_orderkey, sum(l_extendedprice * (1 - l_discount)) AS revenue, o_orderdate, o_shippriority FROM customer, orders, lineitem WHERE c_mktsegment = ''BUILDING'' AND c_custkey = o_custkey AND l_orderkey = o_orderkey AND o_orderdate < CAST(''1995-03-15'' AS DATE) AND l_shipdate > CAST(''1995-03-15'' AS DATE) GROUP BY l_orderkey, o_orderdate, o_shippriority ORDER BY revenue DESC, o_orderdate LIMIT 10');
+----
+true
+
+# ============================================================
+# Q5 — 6-way join with GROUP BY and ORDER BY
+# Operators: GET, FILTER, JOIN x5, AGGREGATE, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT n_name, sum(l_extendedprice * (1 - l_discount)) AS revenue FROM customer, orders, lineitem, supplier, nation, region WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey AND l_suppkey = s_suppkey AND c_nationkey = s_nationkey AND s_nationkey = n_nationkey AND n_regionkey = r_regionkey AND r_name = ''ASIA'' AND o_orderdate >= CAST(''1994-01-01'' AS DATE) AND o_orderdate < CAST(''1995-01-01'' AS DATE) GROUP BY n_name ORDER BY revenue DESC');
+----
+true
+
+# ============================================================
+# Q6 — single table aggregate with BETWEEN filter
+# Operators: GET, FILTER, AGGREGATE
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT sum(l_extendedprice * l_discount) AS revenue FROM lineitem WHERE l_shipdate >= CAST(''1994-01-01'' AS DATE) AND l_shipdate < CAST(''1995-01-01'' AS DATE) AND l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24');
+----
+true
+
+# ============================================================
+# Q10 — 4-way join with GROUP BY, ORDER BY, LIMIT
+# Operators: GET, FILTER, JOIN x3, AGGREGATE, ORDER, LIMIT
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT c_custkey, c_name, sum(l_extendedprice * (1 - l_discount)) AS revenue, c_acctbal, n_name, c_address, c_phone, c_comment FROM customer, orders, lineitem, nation WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey AND o_orderdate >= CAST(''1993-10-01'' AS DATE) AND o_orderdate < CAST(''1994-01-01'' AS DATE) AND l_returnflag = ''R'' AND c_nationkey = n_nationkey GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment ORDER BY revenue DESC LIMIT 20');
+----
+true
+
+# ============================================================
+# Q12 — CASE WHEN + IN list: exercises BOUND_CASE + BOUND_OPERATOR(COMPARE_IN)
+# Operators: GET, FILTER, JOIN, AGGREGATE, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT l_shipmode, sum(CASE WHEN o_orderpriority = ''1-URGENT'' OR o_orderpriority = ''2-HIGH'' THEN 1 ELSE 0 END) AS high_line_count, sum(CASE WHEN o_orderpriority <> ''1-URGENT'' AND o_orderpriority <> ''2-HIGH'' THEN 1 ELSE 0 END) AS low_line_count FROM orders, lineitem WHERE o_orderkey = l_orderkey AND l_shipmode IN (''MAIL'', ''SHIP'') AND l_commitdate < l_receiptdate AND l_shipdate < l_commitdate AND l_receiptdate >= CAST(''1994-01-01'' AS DATE) AND l_receiptdate < CAST(''1995-01-01'' AS DATE) GROUP BY l_shipmode ORDER BY l_shipmode');
+----
+true

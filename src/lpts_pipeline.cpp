@@ -204,8 +204,13 @@ private:
 					child_count = func_expr.children.size();
 				}
 			}
-			// Operators: use infix notation (e.g. "a + b")
-			if (func_expr.is_operator && child_count == 2) {
+			// Operators: use infix notation (e.g. "a + b").
+			// Some plan rewrites (like AVG decomposition) create operator functions
+			// without setting is_operator. Fall back to name-based detection.
+			bool is_infix = func_expr.is_operator ||
+			                (child_count == 2 && (func_name == "/" || func_name == "+" || func_name == "-" ||
+			                                      func_name == "*" || func_name == "%" || func_name == "||"));
+			if (is_infix && child_count == 2) {
 				expr_str << "(";
 				expr_str << ExpressionToAliasedString(func_expr.children[0]);
 				expr_str << " " << func_name << " ";
@@ -733,8 +738,10 @@ private:
 		}
 
 		//----------------------------------------------------------------------
-		case LogicalOperatorType::LOGICAL_INSERT:
-			throw NotImplementedException("AstBuilder: LOGICAL_INSERT is not yet implemented");
+		case LogicalOperatorType::LOGICAL_INSERT: {
+			const LogicalInsert &insert_op = op->Cast<LogicalInsert>();
+			return make_uniq<AstInsertNode>(insert_op.table.name, insert_op.on_conflict_info.action_type);
+		}
 		default:
 			throw NotImplementedException("AstBuilder: operator '%s' is not yet implemented",
 			                              LogicalOperatorToString(op->type));
@@ -963,14 +970,25 @@ public:
 	/// Flatten the AST rooted at `root` into a CteList.
 	/// The root node is handled specially (it produces the FinalReadNode).
 	unique_ptr<CteList> Flatten(const AstNode &root) {
-		// FlattenNode handles the entire subtree (including root's children)
-		// bottom-up via its internal recursion. Do NOT manually iterate
-		// root.children here — that would double-flatten them.
+		const string &type = root.NodeType();
+
+		// INSERT INTO: the root is an AstInsertNode wrapping a child plan.
+		if (type == "Insert") {
+			const AstInsertNode &ins = static_cast<const AstInsertNode &>(root);
+			D_ASSERT(root.children.size() == 1);
+			unique_ptr<CteNode> last_cte = FlattenNode(*root.children[0]);
+			const size_t final_index = node_count++;
+			auto insert_node =
+			    make_uniq<InsertNode>(final_index, ins.target_table, last_cte->cte_name, ins.action_type);
+			cte_nodes.push_back(std::move(last_cte));
+			return make_uniq<CteList>(std::move(cte_nodes), std::move(insert_node));
+		}
+
+		// Regular SELECT: FlattenNode handles the entire subtree bottom-up.
 		unique_ptr<CteNode> last_cte = FlattenNode(root);
 
 		// Build the FinalReadNode: maps CTE column names back to original names.
 		vector<string> final_column_list;
-		const string &type = root.NodeType();
 		const vector<string> &cte_cols = (type == "Project")
 		                                     ? static_cast<const AstProjectNode &>(root).cte_column_names
 		                                     : last_cte->cte_column_list;

@@ -67,9 +67,9 @@ class FinalReadNode : public RootNode {
 	// Attributes.
 	string child_cte_name;
 	vector<string> child_cte_column_list;
-	vector<string> final_column_list;
 
 public:
+	vector<string> final_column_list;
 	~FinalReadNode() override = default;
 	// Constructor. Creates the root representation of a SELECT node.
 	FinalReadNode(const size_t index, string _child_cte_name, vector<string> _child_cte_column_list,
@@ -323,7 +323,9 @@ public:
 	}
 	/// Serialize the CTE list into a SQL query string.
 	/// If `use_newlines` is true, the string uses newlines between CTEs for readability.
-	string ToQuery(bool use_newlines);
+	/// If `output_names` is provided, use them for the final SELECT column aliases
+	/// (overriding the default CTE-derived names).
+	string ToQuery(bool use_newlines, const vector<string> &output_names = {});
 };
 
 /// Converts a DuckDB LogicalOperator tree into a CteList, then to a SQL string.

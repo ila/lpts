@@ -282,7 +282,19 @@ string DistinctNode::ToQuery() {
 
 /// Serialize the entire CTE list into a SQL string.
 /// Output format: WITH cte_0(...) AS (...), cte_1(...) AS (...), ... SELECT ...;
-string CteList::ToQuery(const bool use_newlines) {
+string CteList::ToQuery(const bool use_newlines, const vector<string> &output_names) {
+	// Override final column aliases if output_names are provided
+	if (!output_names.empty()) {
+		auto *fr = dynamic_cast<FinalReadNode *>(final_node.get());
+		if (fr) {
+			for (size_t i = 0; i < output_names.size() && i < fr->final_column_list.size(); i++) {
+				if (!output_names[i].empty()) {
+					fr->final_column_list[i] = output_names[i];
+				}
+			}
+		}
+	}
+
 	std::ostringstream sql_str;
 	if (!nodes.empty()) {
 		sql_str << "WITH ";
@@ -416,8 +428,13 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 				child_count = func_expr.children.size();
 			}
 		}
-		// Operators: use infix notation (e.g. "a + b") instead of function call syntax
-		if (func_expr.is_operator && child_count == 2) {
+		// Operators: use infix notation (e.g. "a + b") instead of function call syntax.
+		// Some plan rewrites (like AVG decomposition) create operator functions
+		// without setting is_operator. Fall back to name-based detection.
+		bool is_infix = func_expr.is_operator ||
+		                (child_count == 2 && (func_name == "/" || func_name == "+" || func_name == "-" ||
+		                                      func_name == "*" || func_name == "%" || func_name == "||"));
+		if (is_infix && child_count == 2) {
 			expr_str << "(";
 			expr_str << ExpressionToAliasedString(func_expr.children[0]);
 			expr_str << " " << func_name << " ";

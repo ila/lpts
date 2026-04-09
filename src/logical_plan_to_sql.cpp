@@ -589,12 +589,15 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		string table_name;
 		string catalog_name;
 		string schema_name;
-		if (catalog_entry) {
+		bool is_table_function = !plan_as_get.parameters.empty();
+		if (catalog_entry && !is_table_function) {
 			table_name = catalog_entry.get()->name;
 			catalog_name = plan_as_get.GetTable()->schema.ParentCatalog().GetName();
 			schema_name = catalog_entry->schema.name;
 		} else {
-			// Table function (e.g. range(), read_csv(), generate_series())
+			// Table function (e.g. range(), read_csv(), ducklake_table_insertions())
+			// Some table functions (like DuckLake scans) set a catalog entry but still
+			// need to be output as function calls with their parameters.
 			std::ostringstream func_str;
 			func_str << plan_as_get.function.name << "(";
 			for (size_t i = 0; i < plan_as_get.parameters.size(); i++) {

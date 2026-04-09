@@ -8,7 +8,7 @@
 //   Phase 2: AST → CTE List       (AstToCteList)
 //
 // The AST is a dialect-agnostic intermediate representation. AstBuilder
-// mirrors the bookkeeping in LogicalPlanToSql::CreateCteNode — it maintains
+// mirrors the bookkeeping in the old CreateCteNode — it maintains
 // the same column_map so that expression strings can be resolved to their
 // CTE column names (e.g. ColumnBinding{0,1} → "t0_name").
 //
@@ -55,7 +55,7 @@ namespace duckdb {
 // AstBuilder — Phase 1 helper
 //
 // Walks the LogicalOperator tree bottom-up and constructs AstNode objects.
-// Maintains a column_map identical to LogicalPlanToSql so expressions can be
+// Maintains a column_map so expressions can be
 // converted to CTE-qualified strings (e.g. "t0_age") during the build phase.
 //==============================================================================
 class AstBuilder {
@@ -135,7 +135,7 @@ private:
 	//
 	// Converts a bound DuckDB expression into a SQL string, replacing internal
 	// ColumnBinding references with their CTE column names via column_map.
-	// Mirrors LogicalPlanToSql::ExpressionToAliasedString exactly.
+	// Converts a bound Expression into a SQL string.
 	//--------------------------------------------------------------------------
 	string ExpressionToAliasedString(const unique_ptr<Expression> &expression) const {
 		const ExpressionClass e_class = expression->GetExpressionClass();
@@ -820,7 +820,7 @@ SqlDialect ParseSqlDialect(const string &value) {
 // AstFlattener — Phase 2 helper
 //
 // Walks the AST in post-order and produces a flat CteList that is identical
-// to what LogicalPlanToSql::LogicalPlanToCteList() would produce.
+// as CTE node objects that can be serialized to SQL.
 //
 // Each AstNode type maps to a specific CteNode type. CTE names are assigned
 // using the same monotonically increasing counter as the original pipeline,

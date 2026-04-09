@@ -1,7 +1,7 @@
 #pragma once
 
 #include "lpts_ast.hpp"
-#include "logical_plan_to_sql.hpp"
+#include "cte_nodes.hpp"
 
 namespace duckdb {
 

@@ -1,7 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "lpts_extension.hpp"
-#include "logical_plan_to_sql.hpp"
+#include "cte_nodes.hpp"
 #include "lpts_ast.hpp"
 #include "lpts_ast_renderer.hpp"
 #include "lpts_pipeline.hpp"

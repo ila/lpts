@@ -12,7 +12,7 @@ include_directories(third_party/ducklake/src/include)
 
 set(EXTENSION_SOURCES
     src/lpts_extension.cpp
-    src/logical_plan_to_sql.cpp
+    src/cte_nodes.cpp
     src/lpts_helpers.cpp
     src/lpts_ast.cpp
     src/lpts_ast_renderer.cpp

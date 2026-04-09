@@ -135,10 +135,13 @@ class AstJoinNode : public AstNode {
 public:
 	JoinType join_type;
 	vector<string> conditions;       ///< Join conditions as strings (e.g. "(t0_id = t1_user_id)").
-	vector<string> cte_column_names; ///< All output column names (left ++ right).
+	vector<string> cte_column_names; ///< All output column names (left ++ right + mark if MARK join).
+	string mark_expression;          ///< For MARK→LEFT conversion: "(rhs_key IS NOT NULL)" expression.
 
-	AstJoinNode(JoinType join_type, vector<string> conditions, vector<string> cte_column_names)
-	    : join_type(join_type), conditions(std::move(conditions)), cte_column_names(std::move(cte_column_names)) {
+	AstJoinNode(JoinType join_type, vector<string> conditions, vector<string> cte_column_names,
+	            string mark_expression = "")
+	    : join_type(join_type), conditions(std::move(conditions)), cte_column_names(std::move(cte_column_names)),
+	      mark_expression(std::move(mark_expression)) {
 	}
 
 	string ToString(int indent = 0) const override;

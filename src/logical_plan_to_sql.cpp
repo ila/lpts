@@ -136,9 +136,11 @@ string GetNode::ToQuery() {
 	} else {
 		// Unqualified: table function or simple table name
 		get_str << table_name;
-		// For table functions (name contains parentheses), add column aliases
-		// so that renamed columns (e.g. range(1,10) t(i)) resolve correctly.
-		if (table_name.find('(') != string::npos && !column_names.empty()) {
+		// For table functions, add column aliases so renamed columns resolve correctly.
+		// Skip for DuckLake functions — the _tf alias mismatches when virtual columns
+		// (snapshot_id, rowid) are in the SELECT but not in the function's output schema.
+		if (table_name.find('(') != string::npos && !column_names.empty() &&
+		    table_name.find("ducklake_table_") == string::npos) {
 			get_str << " _tf(" << VecToSeparatedList(column_names) << ")";
 		}
 	}
@@ -194,7 +196,14 @@ string JoinNode::ToQuery() {
 	std::ostringstream join_str;
 	// Use explicit column list instead of SELECT * to avoid including
 	// duplicate join key columns from both sides of the join.
-	join_str << "SELECT " << VecToSeparatedList(cte_column_list) << " FROM ";
+	// For MARK→LEFT joins, the last column is a computed mark expression.
+	if (!mark_expression.empty() && !cte_column_list.empty()) {
+		vector<string> select_cols(cte_column_list.begin(), cte_column_list.end() - 1);
+		select_cols.push_back(mark_expression);
+		join_str << "SELECT " << VecToSeparatedList(select_cols) << " FROM ";
+	} else {
+		join_str << "SELECT " << VecToSeparatedList(cte_column_list) << " FROM ";
+	}
 	join_str << left_cte_name;
 	join_str << " ";
 	switch (join_type) {
@@ -585,19 +594,32 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		                 " names.size()=" + std::to_string(plan_as_get.names.size()));
 		auto catalog_entry = plan_as_get.GetTable();
 		LPTS_DEBUG_PRINT("[LPTS] GET: catalog_entry=" + string(catalog_entry ? "valid" : "null"));
+		// Inspect function info
+		LPTS_DEBUG_PRINT("[LPTS] GET: function.name='" + plan_as_get.function.name + "'");
+		LPTS_DEBUG_PRINT("[LPTS] GET: parameters.size()=" + std::to_string(plan_as_get.parameters.size()));
+		for (size_t pi = 0; pi < plan_as_get.parameters.size(); pi++) {
+			LPTS_DEBUG_PRINT("[LPTS] GET:   param[" + std::to_string(pi) +
+			                 "]=" + plan_as_get.parameters[pi].ToString());
+		}
+		LPTS_DEBUG_PRINT("[LPTS] GET: named_parameters.size()=" + std::to_string(plan_as_get.named_parameters.size()));
+		for (auto &np : plan_as_get.named_parameters) {
+			LPTS_DEBUG_PRINT("[LPTS] GET:   named_param '" + np.first + "'=" + np.second.ToString());
+		}
+		// Check extra_info from ParamsToString
+		auto params_str = plan_as_get.ParamsToString();
+		for (auto &ps : params_str) {
+			LPTS_DEBUG_PRINT("[LPTS] GET:   ParamsToString: '" + ps.first + "'='" + ps.second + "'");
+		}
 		const idx_t table_index = plan_as_get.table_index;
 		string table_name;
 		string catalog_name;
 		string schema_name;
-		bool is_table_function = !plan_as_get.parameters.empty();
-		if (catalog_entry && !is_table_function) {
+		if (catalog_entry) {
 			table_name = catalog_entry.get()->name;
 			catalog_name = plan_as_get.GetTable()->schema.ParentCatalog().GetName();
 			schema_name = catalog_entry->schema.name;
 		} else {
-			// Table function (e.g. range(), read_csv(), ducklake_table_insertions())
-			// Some table functions (like DuckLake scans) set a catalog entry but still
-			// need to be output as function calls with their parameters.
+			// Table function (e.g. range(), read_csv(), generate_series())
 			std::ostringstream func_str;
 			func_str << plan_as_get.function.name << "(";
 			for (size_t i = 0; i < plan_as_get.parameters.size(); i++) {
@@ -717,8 +739,8 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 	}
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
 		const LogicalAggregate &plan_as_aggregate = subplan->Cast<LogicalAggregate>();
-		LPTS_DEBUG_PRINT("[LPTS] AGGREGATE: group_index=" + std::to_string(plan_as_aggregate.group_index.index) +
-		                 " aggregate_index=" + std::to_string(plan_as_aggregate.aggregate_index.index) +
+		LPTS_DEBUG_PRINT("[LPTS] AGGREGATE: group_index=" + std::to_string(plan_as_aggregate.group_index) +
+		                 " aggregate_index=" + std::to_string(plan_as_aggregate.aggregate_index) +
 		                 " groups.size()=" + std::to_string(plan_as_aggregate.groups.size()) +
 		                 " expressions.size()=" + std::to_string(plan_as_aggregate.expressions.size()) +
 		                 " children_indices.size()=" + std::to_string(children_indices.size()));

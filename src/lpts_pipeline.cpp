@@ -1,3 +1,5 @@
+#include "storage/ducklake_scan.hpp"
+
 //==============================================================================
 // lpts_pipeline.cpp
 //
@@ -345,9 +347,82 @@ private:
 			const LogicalGet &get = op->Cast<LogicalGet>();
 			auto catalog_entry = get.GetTable();
 			const idx_t table_index = get.table_index;
-			const string catalog_name = get.GetTable()->schema.ParentCatalog().GetName();
-			const string schema_name = catalog_entry->schema.name;
-			const string table_name = catalog_entry.get()->name;
+			string catalog_name;
+			string schema_name;
+			string table_name;
+
+			LPTS_DEBUG_PRINT("[LPTS-AST] GET: function.name='" + get.function.name +
+			                 "' params=" + std::to_string(get.parameters.size()) +
+			                 " named_params=" + std::to_string(get.named_parameters.size()) +
+			                 " catalog_entry=" + string(catalog_entry ? "valid" : "null"));
+			for (size_t pi = 0; pi < get.parameters.size(); pi++) {
+				LPTS_DEBUG_PRINT("[LPTS-AST] GET:   param[" + std::to_string(pi) +
+				                 "]=" + get.parameters[pi].ToString());
+			}
+			for (auto &np : get.named_parameters) {
+				LPTS_DEBUG_PRINT("[LPTS-AST] GET:   named '" + np.first + "'=" + np.second.ToString());
+			}
+			auto params_map = get.ParamsToString();
+			for (auto &ps : params_map) {
+				LPTS_DEBUG_PRINT("[LPTS-AST] GET:   ParamsToString '" + ps.first + "'='" + ps.second + "'");
+			}
+
+			// Check for DuckLake snapshot-range scans (insertions/deletions) and time travel.
+			bool is_ducklake_change_scan = false;
+			bool is_ducklake_time_travel = false;
+			idx_t ducklake_snapshot_id = 0;
+			if (get.function.name == "ducklake_scan" && get.function.function_info) {
+				auto &func_info = get.function.function_info->Cast<DuckLakeFunctionInfo>();
+				// AT VERSION: regular SCAN_TABLE with an explicit snapshot.
+				// We always output AT VERSION for DuckLake scans — if it's the current
+				// snapshot, the result is the same as without AT VERSION.
+				if (func_info.scan_type == DuckLakeScanType::SCAN_TABLE &&
+				    func_info.snapshot.snapshot_id != DConstants::INVALID_INDEX) {
+					is_ducklake_time_travel = true;
+					ducklake_snapshot_id = func_info.snapshot.snapshot_id;
+				}
+				if (func_info.scan_type == DuckLakeScanType::SCAN_INSERTIONS ||
+				    func_info.scan_type == DuckLakeScanType::SCAN_DELETIONS) {
+					is_ducklake_change_scan = true;
+					string func_name = (func_info.scan_type == DuckLakeScanType::SCAN_INSERTIONS)
+					                       ? "ducklake_table_insertions"
+					                       : "ducklake_table_deletions";
+					std::ostringstream func_str;
+					func_str << func_name << "(";
+					for (size_t i = 0; i < get.parameters.size(); i++) {
+						if (i > 0) {
+							func_str << ", ";
+						}
+						func_str << get.parameters[i].ToSQLString();
+					}
+					func_str << ")";
+					table_name = func_str.str();
+					LPTS_DEBUG_PRINT("[LPTS-AST] GET: DuckLake change scan -> " + table_name);
+				}
+			}
+
+			if (!is_ducklake_change_scan) {
+				if (catalog_entry) {
+					catalog_name = catalog_entry->schema.ParentCatalog().GetName();
+					schema_name = catalog_entry->schema.name;
+					table_name = catalog_entry.get()->name;
+					if (is_ducklake_time_travel) {
+						table_name += " AT (VERSION => " + std::to_string(ducklake_snapshot_id) + ")";
+					}
+				} else {
+					// Table function without catalog entry (e.g. range(), read_csv())
+					std::ostringstream func_str;
+					func_str << get.function.name << "(";
+					for (size_t i = 0; i < get.parameters.size(); i++) {
+						if (i > 0) {
+							func_str << ", ";
+						}
+						func_str << get.parameters[i].ToSQLString();
+					}
+					func_str << ")";
+					table_name = func_str.str();
+				}
+			}
 
 			vector<string> column_names;
 			vector<string> cte_column_names;
@@ -356,6 +431,14 @@ private:
 			const vector<ColumnBinding> col_binds = op->GetColumnBindings();
 			const auto col_ids = get.GetColumnIds();
 
+			LPTS_DEBUG_PRINT("[LPTS-AST] GET: col_binds=" + std::to_string(col_binds.size()) + " col_ids=" +
+			                 std::to_string(col_ids.size()) + " names=" + std::to_string(get.names.size()));
+			for (size_t di = 0; di < col_ids.size(); di++) {
+				LPTS_DEBUG_PRINT("[LPTS-AST] GET:   col_id[" + std::to_string(di) +
+				                 "] primary=" + std::to_string(col_ids[di].GetPrimaryIndex()) +
+				                 " virtual=" + std::to_string(col_ids[di].IsVirtualColumn()));
+			}
+
 			for (size_t i = 0; i < col_binds.size(); ++i) {
 				if (i >= col_ids.size()) {
 					// ROWID-only scan (e.g. COUNT(*)) — register dummy entry.
@@ -363,8 +446,15 @@ private:
 					column_map[MappableColumnBinding(cb)] = make_uniq<ColStruct>(table_index, "rowid", "");
 					continue;
 				}
-				const idx_t idx = col_ids[i].GetPrimaryIndex();
-				const string col_name = get.names[idx];
+				string col_name;
+				if (col_ids[i].IsVirtualColumn()) {
+					// Virtual columns (snapshot_id, rowid, etc.) — look up in virtual_columns map
+					auto vit = get.virtual_columns.find(col_ids[i].GetPrimaryIndex());
+					col_name = (vit != get.virtual_columns.end()) ? vit->second.name : "virtual_col";
+				} else {
+					const idx_t idx = col_ids[i].GetPrimaryIndex();
+					col_name = get.names[idx];
+				}
 				const ColumnBinding &cb = col_binds[i];
 				auto col_struct = make_uniq<ColStruct>(table_index, col_name, "");
 				column_names.push_back(col_name);
@@ -515,12 +605,42 @@ private:
 				string cmp = ExpressionTypeToOperator(cond.comparison);
 				conditions.push_back("(" + lhs + " " + cmp + " " + rhs + ")");
 			}
+
+			// MARK joins produce an extra boolean column indicating match existence.
+			// In SQL: LEFT JOIN + (right_key IS NOT NULL) as a computed column.
+			// We register it with a clean alias so parent CTEs can reference it.
+			if (join_op.join_type == JoinType::MARK) {
+				ColumnBinding mark_cb(join_op.mark_index, 0);
+				string mark_expr;
+				if (!join_op.conditions.empty()) {
+					mark_expr = "(" + ExpressionToAliasedString(join_op.conditions[0].right) + " IS NOT NULL)";
+				} else {
+					mark_expr = "true";
+				}
+				auto mark_col = make_uniq<ColStruct>(join_op.mark_index, mark_expr, "_mark");
+				column_map[MappableColumnBinding(mark_cb)] = std::move(mark_col);
+			}
+
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
 				unique_ptr<ColStruct> &col_struct = column_map.at(MappableColumnBinding(cb));
 				cte_column_names.push_back(col_struct->ToUniqueColumnName());
 			}
-			return make_uniq<AstJoinNode>(join_op.join_type, std::move(conditions), std::move(cte_column_names));
+
+			// Convert MARK join to LEFT join for SQL output
+			JoinType sql_join_type = join_op.join_type;
+			string mark_expr;
+			if (sql_join_type == JoinType::MARK) {
+				sql_join_type = JoinType::LEFT;
+				// Extract the mark expression we registered in column_map
+				ColumnBinding mark_cb(join_op.mark_index, 0);
+				auto it = column_map.find(MappableColumnBinding(mark_cb));
+				if (it != column_map.end()) {
+					mark_expr = it->second->column_name; // contains the IS NOT NULL expression
+				}
+			}
+			return make_uniq<AstJoinNode>(sql_join_type, std::move(conditions), std::move(cte_column_names),
+			                              std::move(mark_expr));
 		}
 
 		case LogicalOperatorType::LOGICAL_CROSS_PRODUCT: {
@@ -781,7 +901,7 @@ private:
 			const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
 			const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
 			return make_uniq<JoinNode>(my_index, join.cte_column_names, left_cte_name, right_cte_name, join.join_type,
-			                           join.conditions);
+			                           join.conditions, join.mark_expression);
 		}
 
 		if (type == "Union") {

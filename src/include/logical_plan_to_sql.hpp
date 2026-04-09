@@ -216,15 +216,16 @@ class JoinNode : public CteNode {
 	string left_cte_name, right_cte_name;
 	JoinType join_type;
 	vector<string> join_conditions;
+	string mark_expression; ///< For MARK→LEFT conversion: computed boolean column expression.
 
 public:
 	~JoinNode() override = default;
 	// Constructor.
 	JoinNode(const size_t index, vector<string> cte_column_names, string _left_cte_name, string _right_cte_name,
-	         JoinType _join_type, vector<string> _join_conditions)
+	         JoinType _join_type, vector<string> _join_conditions, string _mark_expression = "")
 	    : CteNode(index, "join_" + std::to_string(index), std::move(cte_column_names)),
 	      left_cte_name(std::move(_left_cte_name)), right_cte_name(std::move(_right_cte_name)), join_type(_join_type),
-	      join_conditions(std::move(_join_conditions)) {
+	      join_conditions(std::move(_join_conditions)), mark_expression(std::move(_mark_expression)) {
 	}
 	// Functions.
 	string ToQuery() override;

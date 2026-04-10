@@ -22,6 +22,7 @@
 #include "lpts_pipeline.hpp"
 #include "lpts_helpers.hpp"
 #include "lpts_debug.hpp"
+#include "duckdb/main/connection.hpp"
 
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -98,6 +99,29 @@ private:
 
 	/// SQL dialect for expression serialization (function renaming, etc.)
 	SqlDialect dialect = SqlDialect::DUCKDB;
+
+	/// Client context for runtime queries (e.g. DuckLake current snapshot).
+	ClientContext &context;
+
+	/// Cache: DuckLake catalog name → current snapshot_id.
+	/// Populated lazily on first DuckLake scan per catalog.
+	unordered_map<string, idx_t> ducklake_current_snapshots;
+
+	/// Query the current snapshot_id for a DuckLake catalog.
+	idx_t GetDuckLakeCurrentSnapshot(const string &catalog_name) {
+		auto it = ducklake_current_snapshots.find(catalog_name);
+		if (it != ducklake_current_snapshots.end()) {
+			return it->second;
+		}
+		Connection con(*context.db);
+		auto result = con.Query("SELECT id FROM " + catalog_name + ".current_snapshot()");
+		idx_t snap_id = DConstants::INVALID_INDEX;
+		if (!result->HasError() && result->RowCount() > 0) {
+			snap_id = result->GetValue(0, 0).GetValue<idx_t>();
+		}
+		ducklake_current_snapshots[catalog_name] = snap_id;
+		return snap_id;
+	}
 
 	/// Global map: ColumnBinding → ColStruct.
 	/// Populated bottom-up; each operator registers its output columns here.
@@ -411,13 +435,27 @@ private:
 			idx_t ducklake_snapshot_id = 0;
 			if (get.function.name == "ducklake_scan" && get.function.function_info) {
 				auto &func_info = get.function.function_info->Cast<DuckLakeFunctionInfo>();
-				// AT VERSION: regular SCAN_TABLE with an explicit snapshot.
-				// We always output AT VERSION for DuckLake scans — if it's the current
-				// snapshot, the result is the same as without AT VERSION.
-				if (func_info.scan_type == DuckLakeScanType::SCAN_TABLE &&
-				    func_info.snapshot.snapshot_id != DConstants::INVALID_INDEX) {
-					is_ducklake_time_travel = true;
-					ducklake_snapshot_id = func_info.snapshot.snapshot_id;
+				// AT VERSION: only emit for explicit time-travel scans, NOT for
+				// regular current-snapshot scans. Every ducklake_scan has a valid
+				// snapshot_id (the current transaction's), but emitting AT VERSION
+				// for those would pin stored queries (e.g. MV definitions) to a
+				// specific snapshot instead of reading current data.
+				// Detection: compare the scan's snapshot against the transaction's
+				// current snapshot (same pattern as ducklake_scan.cpp:158).
+				if (func_info.scan_type == DuckLakeScanType::SCAN_TABLE) {
+					// Detect explicit time travel by comparing the scan's snapshot
+					// against the catalog's current snapshot. Regular scans use the
+					// current snapshot; AT VERSION scans use a historical one.
+					auto catalog_entry = get.GetTable();
+					if (catalog_entry) {
+						string cat_name = catalog_entry->ParentCatalog().GetName();
+						idx_t current_snap = GetDuckLakeCurrentSnapshot(cat_name);
+						if (current_snap != DConstants::INVALID_INDEX &&
+						    func_info.snapshot.snapshot_id != current_snap) {
+							is_ducklake_time_travel = true;
+							ducklake_snapshot_id = func_info.snapshot.snapshot_id;
+						}
+					}
 				}
 				if (func_info.scan_type == DuckLakeScanType::SCAN_INSERTIONS ||
 				    func_info.scan_type == DuckLakeScanType::SCAN_DELETIONS) {
@@ -911,7 +949,8 @@ private:
 	}
 
 public:
-	explicit AstBuilder(SqlDialect _dialect = SqlDialect::DUCKDB) : dialect(_dialect) {
+	AstBuilder(ClientContext &_context, SqlDialect _dialect = SqlDialect::DUCKDB)
+	    : dialect(_dialect), context(_context) {
 	}
 
 	/// Entry point: walk the plan and return the AST root.
@@ -924,7 +963,7 @@ public:
 // Phase 1 entry point
 //==============================================================================
 unique_ptr<AstNode> LogicalPlanToAst(ClientContext &context, unique_ptr<LogicalOperator> &plan, SqlDialect dialect) {
-	AstBuilder builder(dialect);
+	AstBuilder builder(context, dialect);
 	return builder.Build(plan);
 }
 

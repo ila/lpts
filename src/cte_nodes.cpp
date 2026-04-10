@@ -124,7 +124,14 @@ string FilterNode::ToQuery() {
 	get_str << child_cte_name;
 	if (!conditions.empty()) {
 		get_str << " WHERE ";
-		get_str << VecToSeparatedList(conditions, " AND ");
+		// Wrap each condition in parentheses to preserve precedence
+		// when conditions containing OR are ANDed together.
+		for (size_t i = 0; i < conditions.size(); i++) {
+			if (i > 0) {
+				get_str << " AND ";
+			}
+			get_str << "(" << conditions[i] << ")";
+		}
 	}
 	return get_str.str();
 }

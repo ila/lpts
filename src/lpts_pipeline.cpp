@@ -47,6 +47,7 @@
 #include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_distinct.hpp"
+#include "duckdb/planner/operator/logical_empty_result.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 namespace duckdb {
@@ -339,11 +340,43 @@ private:
 	}
 
 	//--------------------------------------------------------------------------
+	// IsCompressedMaterializationProjection
+	//
+	// Returns true if the projection contains only __internal_compress_* or
+	// __internal_decompress_* function calls (plus pass-through column refs).
+	// These are DuckDB optimizer-internal compressed materialization nodes
+	// that cannot appear in user-facing SQL.
+	//--------------------------------------------------------------------------
+	static bool IsCompressedMaterializationProjection(const LogicalProjection &proj) {
+		if (proj.expressions.empty()) {
+			return false;
+		}
+		bool has_internal_func = false;
+		for (auto &expr : proj.expressions) {
+			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+				continue; // pass-through is fine
+			}
+			if (expr->type == ExpressionType::BOUND_FUNCTION) {
+				auto &func = expr->Cast<BoundFunctionExpression>();
+				const string &name = func.function.name;
+				if (name.rfind("__internal_compress_", 0) == 0 || name.rfind("__internal_decompress_", 0) == 0) {
+					has_internal_func = true;
+					continue;
+				}
+			}
+			return false; // non-passthrough, non-internal expression
+		}
+		return has_internal_func;
+	}
+
+	//--------------------------------------------------------------------------
 	// BuildNode
 	//
 	// Creates an AstNode for the given operator. Children must already be
 	// processed and attached. Returns the AstNode with column_map updated for
 	// this operator's output columns so parent operators can resolve them.
+	// Returns nullptr for nodes that should be skipped (e.g. compressed
+	// materialization projections).
 	//--------------------------------------------------------------------------
 	unique_ptr<AstNode> BuildNode(unique_ptr<LogicalOperator> &op) {
 		switch (op->type) {
@@ -445,26 +478,50 @@ private:
 			}
 
 			for (size_t i = 0; i < col_binds.size(); ++i) {
-				if (i >= col_ids.size()) {
+				const ColumnBinding &cb = col_binds[i];
+				// The binding's column_index tells us which entry in col_ids
+				// this output column corresponds to. When projection_ids is set
+				// (optimizer removed unused columns), the binding index may
+				// differ from the loop index.
+				const idx_t col_id_idx = cb.column_index;
+				if (col_id_idx >= col_ids.size()) {
 					// ROWID-only scan (e.g. COUNT(*)) — register dummy entry.
-					const ColumnBinding &cb = col_binds[i];
 					column_map[MappableColumnBinding(cb)] = make_uniq<ColStruct>(table_index, "rowid", "");
 					continue;
 				}
 				string col_name;
-				if (col_ids[i].IsVirtualColumn()) {
+				if (col_ids[col_id_idx].IsVirtualColumn()) {
 					// Virtual columns (snapshot_id, rowid, etc.) — look up in virtual_columns map
-					auto vit = get.virtual_columns.find(col_ids[i].GetPrimaryIndex());
-					col_name = (vit != get.virtual_columns.end()) ? vit->second.name : "virtual_col";
+					auto vit = get.virtual_columns.find(col_ids[col_id_idx].GetPrimaryIndex());
+					col_name = (vit != get.virtual_columns.end()) ? vit->second.name : "";
+					if (col_name.empty()) {
+						col_name = "rowid";
+					}
 				} else {
-					const idx_t idx = col_ids[i].GetPrimaryIndex();
+					const idx_t idx = col_ids[col_id_idx].GetPrimaryIndex();
 					col_name = get.names[idx];
 				}
-				const ColumnBinding &cb = col_binds[i];
 				auto col_struct = make_uniq<ColStruct>(table_index, col_name, "");
 				column_names.push_back(col_name);
 				cte_column_names.push_back(col_struct->ToUniqueColumnName());
 				column_map[MappableColumnBinding(cb)] = std::move(col_struct);
+			}
+
+			// COUNT(*) / ROWID-only scans: emit a dummy column so the CTE body
+			// is valid SQL (SELECT 1 FROM ...). This covers both empty scans and
+			// virtual-column-only scans (e.g. DuckLake ROWID for COUNT(*)).
+			bool has_real_column = false;
+			for (auto &cn : column_names) {
+				if (cn != "rowid") {
+					has_real_column = true;
+					break;
+				}
+			}
+			if (!has_real_column) {
+				column_names.clear();
+				cte_column_names.clear();
+				column_names.push_back("1");
+				cte_column_names.push_back("t" + std::to_string(table_index) + "_dummy");
 			}
 
 			// Pushdown table filters (rare, but present in some plans).
@@ -492,6 +549,42 @@ private:
 		case LogicalOperatorType::LOGICAL_PROJECTION: {
 			const LogicalProjection &proj = op->Cast<LogicalProjection>();
 			const idx_t table_index = proj.table_index;
+
+			// Skip compressed materialization projections (compress/decompress).
+			// These contain __internal_compress_* or __internal_decompress_* functions
+			// that are internal-only and cannot appear in user-facing SQL.
+			// We remap bindings to point through to the source columns and return nullptr
+			// to signal RecursiveTraversal to pass through the child node directly.
+			if (IsCompressedMaterializationProjection(proj)) {
+				LPTS_DEBUG_PRINT("[LPTS-AST] Skipping compressed materialization projection (table_index=" +
+				                 std::to_string(table_index) + ")");
+				for (size_t i = 0; i < proj.expressions.size(); ++i) {
+					const ColumnBinding new_cb(table_index, i);
+					const unique_ptr<Expression> &expr = proj.expressions[i];
+					if (expr->type == ExpressionType::BOUND_FUNCTION) {
+						// compress/decompress: remap to child's source column,
+						// preserving the source's table_index so the column name
+						// matches the CTE that actually defines it.
+						auto &func = expr->Cast<BoundFunctionExpression>();
+						D_ASSERT(!func.children.empty());
+						auto &child = func.children[0];
+						if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+							auto &bcr = child->Cast<BoundColumnRefExpression>();
+							auto &src = column_map.at(MappableColumnBinding(bcr.binding));
+							column_map[MappableColumnBinding(new_cb)] =
+							    make_uniq<ColStruct>(src->table_index, src->column_name, src->alias);
+						}
+					} else if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+						// pass-through column ref: preserve source's table_index
+						auto &bcr = expr->Cast<BoundColumnRefExpression>();
+						auto &src = column_map.at(MappableColumnBinding(bcr.binding));
+						column_map[MappableColumnBinding(new_cb)] =
+						    make_uniq<ColStruct>(src->table_index, src->column_name, src->alias);
+					}
+				}
+				return nullptr;
+			}
+
 			vector<string> expressions;
 			vector<string> cte_column_names;
 			unordered_set<string> seen_names;
@@ -574,7 +667,13 @@ private:
 				}
 				const BoundAggregateExpression &ba = expr->Cast<BoundAggregateExpression>();
 				std::ostringstream agg_str;
-				agg_str << ba.function.name << "(";
+				// Replace internal aggregate variants with their user-facing equivalents.
+				// sum_no_overflow is used by compressed materialization but is internal-only.
+				string agg_name = ba.function.name;
+				if (agg_name == "sum_no_overflow") {
+					agg_name = "sum";
+				}
+				agg_str << agg_name << "(";
 				if (ba.IsDistinct()) {
 					agg_str << "DISTINCT ";
 				}
@@ -742,6 +841,26 @@ private:
 			const LogicalInsert &insert_op = op->Cast<LogicalInsert>();
 			return make_uniq<AstInsertNode>(insert_op.table.name, insert_op.on_conflict_info.action_type);
 		}
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_EMPTY_RESULT: {
+			// The optimizer replaced a subtree with an empty result (e.g. LIMIT 0).
+			// Generate a scan-like node that returns zero rows by adding WHERE false.
+			const LogicalEmptyResult &empty = op->Cast<LogicalEmptyResult>();
+			vector<string> column_names;
+			vector<string> cte_column_names;
+			for (size_t i = 0; i < empty.bindings.size(); i++) {
+				string col_name = "c" + std::to_string(i);
+				auto col_struct = make_uniq<ColStruct>(empty.bindings[i].table_index, col_name, "");
+				cte_column_names.push_back(col_struct->ToUniqueColumnName());
+				column_names.push_back("NULL::" + empty.return_types[i].ToString());
+				column_map[MappableColumnBinding(empty.bindings[i])] = std::move(col_struct);
+			}
+			// Emit a dummy scan with WHERE false to produce zero rows
+			vector<string> filters = {"false"};
+			return make_uniq<AstGetNode>("", "", "__empty__", 0, std::move(column_names), std::move(cte_column_names),
+			                             std::move(filters));
+		}
+
 		default:
 			throw NotImplementedException("AstBuilder: operator '%s' is not yet implemented",
 			                              LogicalOperatorToString(op->type));
@@ -778,6 +897,12 @@ private:
 		}
 		// 2. Build this node (column_map is now populated by children).
 		unique_ptr<AstNode> node = BuildNode(op);
+		// A nullptr return means this node should be skipped (e.g. compressed
+		// materialization projection). Pass through the single child directly.
+		if (!node) {
+			D_ASSERT(child_nodes.size() == 1);
+			return std::move(child_nodes[0]);
+		}
 		// 3. Attach children to preserve the tree structure.
 		for (auto &c : child_nodes) {
 			node->children.push_back(std::move(c));

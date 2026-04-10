@@ -15,6 +15,8 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/planner.hpp"
+#include "duckdb/common/enums/optimizer_type.hpp"
+#include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/main/config.hpp"
 
 namespace duckdb {
@@ -31,6 +33,51 @@ static SqlDialect ReadDialect(ClientContext &context) {
 	return SqlDialect::DUCKDB;
 }
 
+/// Plan a query and run it through the optimizer, returning the optimized
+/// logical plan. This ensures LPTS sees the same plan DuckDB would execute.
+///
+/// Some optimizers are disabled because they produce plan nodes or structures
+/// that LPTS cannot yet convert back to SQL:
+///   - COLUMN_LIFETIME: changes column bindings in ways that break CTE references
+///   - STATISTICS_PROPAGATION: triggers DUMMY_SCAN for constant-foldable queries
+///   - REORDER_FILTER: introduces optional filter prefixes in scan filters
+///   - TOP_N: fuses ORDER+LIMIT into a single node LPTS can't serialize
+///   - JOIN_FILTER_PUSHDOWN: wraps pushed-down filters in OptionalFilter ("optional:" prefix)
+///   - CTE_INLINING: introduces CTE_SCAN nodes
+///   - MATERIALIZED_CTE: introduces CTE_SCAN nodes
+///   - COMMON_SUBPLAN: introduces CTE_SCAN nodes
+///
+/// TODO: research whether these can be re-enabled by adding support for the
+/// plan structures they produce (EMPTY_RESULT node, optional filters, CTE_SCAN, etc.)
+static unique_ptr<LogicalOperator> PlanQuery(ClientContext &context, const string &query) {
+	Parser parser;
+	parser.ParseQuery(query);
+	if (parser.statements.empty()) {
+		throw ParserException("Failed to parse query: %s", query);
+	}
+	Planner planner(context);
+	planner.CreatePlan(parser.statements[0]->Copy());
+
+	// Temporarily disable optimizers that produce unsupported plan structures
+	auto &config = DBConfig::GetConfig(context);
+	auto saved = config.options.disabled_optimizers;
+	config.options.disabled_optimizers.insert(OptimizerType::COLUMN_LIFETIME);
+	config.options.disabled_optimizers.insert(OptimizerType::STATISTICS_PROPAGATION);
+	config.options.disabled_optimizers.insert(OptimizerType::REORDER_FILTER);
+	config.options.disabled_optimizers.insert(OptimizerType::TOP_N);
+	config.options.disabled_optimizers.insert(OptimizerType::FILTER_PUSHDOWN);
+	config.options.disabled_optimizers.insert(OptimizerType::JOIN_FILTER_PUSHDOWN);
+	config.options.disabled_optimizers.insert(OptimizerType::CTE_INLINING);
+	config.options.disabled_optimizers.insert(OptimizerType::MATERIALIZED_CTE);
+	config.options.disabled_optimizers.insert(OptimizerType::COMMON_SUBPLAN);
+
+	Optimizer optimizer(*planner.binder, context);
+	auto result = optimizer.Optimize(std::move(planner.plan));
+
+	config.options.disabled_optimizers = saved;
+	return result;
+}
+
 //------------------------------------------------------------------------------
 // PRAGMA lpts('query') — converts a SQL query's logical plan to a SQL string.
 //
@@ -41,23 +88,15 @@ static SqlDialect ReadDialect(ClientContext &context) {
 
 static string LptsPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
 	auto query = StringValue::Get(parameters.values[0]);
-
-	Parser parser;
-	parser.ParseQuery(query);
-	if (parser.statements.empty()) {
-		throw ParserException("Failed to parse query: %s", query);
-	}
-
-	Planner planner(context);
-	planner.CreatePlan(parser.statements[0]->Copy());
+	auto plan = PlanQuery(context, query);
 
 #if LPTS_DEBUG
 	LPTS_DEBUG_PRINT("[LPTS] Logical plan for: " + query);
-	planner.plan->Print();
+	plan->Print();
 #endif
 
 	SqlDialect dialect = ReadDialect(context);
-	auto ast = LogicalPlanToAst(context, planner.plan, dialect);
+	auto ast = LogicalPlanToAst(context, plan, dialect);
 	auto cte_list = AstToCteList(*ast, dialect);
 	string result_sql = cte_list->ToQuery(true);
 
@@ -85,23 +124,15 @@ struct LptsGlobalState : public GlobalTableFunctionState {
 static unique_ptr<FunctionData> LptsTableBind(ClientContext &context, TableFunctionBindInput &input,
                                               vector<LogicalType> &return_types, vector<string> &names) {
 	auto query = StringValue::Get(input.inputs[0]);
-
-	Parser parser;
-	parser.ParseQuery(query);
-	if (parser.statements.empty()) {
-		throw ParserException("Failed to parse query: %s", query);
-	}
-
-	Planner planner(context);
-	planner.CreatePlan(parser.statements[0]->Copy());
+	auto plan = PlanQuery(context, query);
 
 #if LPTS_DEBUG
 	LPTS_DEBUG_PRINT("[LPTS] Logical plan for: " + query);
-	planner.plan->Print();
+	plan->Print();
 #endif
 
 	SqlDialect dialect = ReadDialect(context);
-	auto ast = LogicalPlanToAst(context, planner.plan, dialect);
+	auto ast = LogicalPlanToAst(context, plan, dialect);
 	auto cte_list = AstToCteList(*ast, dialect);
 
 	auto result = make_uniq<LptsBindData>();
@@ -137,18 +168,10 @@ static void LptsTableFunc(ClientContext &context, TableFunctionInput &data_p, Da
 
 static string LptsExecPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
 	auto query = StringValue::Get(parameters.values[0]);
-
-	Parser parser;
-	parser.ParseQuery(query);
-	if (parser.statements.empty()) {
-		throw ParserException("Failed to parse query: %s", query);
-	}
-
-	Planner planner(context);
-	planner.CreatePlan(parser.statements[0]->Copy());
+	auto plan = PlanQuery(context, query);
 
 	SqlDialect dialect = ReadDialect(context);
-	auto ast = LogicalPlanToAst(context, planner.plan, dialect);
+	auto ast = LogicalPlanToAst(context, plan, dialect);
 	auto cte_list = AstToCteList(*ast, dialect);
 	return cte_list->ToQuery(true);
 }
@@ -162,18 +185,10 @@ static string LptsExecPragmaFunction(ClientContext &context, const FunctionParam
 
 static string LptsCheckPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
 	auto query = StringValue::Get(parameters.values[0]);
-
-	Parser parser;
-	parser.ParseQuery(query);
-	if (parser.statements.empty()) {
-		throw ParserException("Failed to parse query: %s", query);
-	}
-
-	Planner planner(context);
-	planner.CreatePlan(parser.statements[0]->Copy());
+	auto plan = PlanQuery(context, query);
 
 	SqlDialect dialect = ReadDialect(context);
-	auto ast = LogicalPlanToAst(context, planner.plan, dialect);
+	auto ast = LogicalPlanToAst(context, plan, dialect);
 	auto cte_list = AstToCteList(*ast, dialect);
 	string lpts_sql = cte_list->ToQuery(true);
 
@@ -203,17 +218,9 @@ static string LptsCheckPragmaFunction(ClientContext &context, const FunctionPara
 
 static void PrintAstPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
 	auto query = StringValue::Get(parameters.values[0]);
+	auto plan = PlanQuery(context, query);
 
-	Parser parser;
-	parser.ParseQuery(query);
-	if (parser.statements.empty()) {
-		throw ParserException("Failed to parse query: %s", query);
-	}
-
-	Planner planner(context);
-	planner.CreatePlan(parser.statements[0]->Copy());
-
-	auto ast = LogicalPlanToAst(context, planner.plan);
+	auto ast = LogicalPlanToAst(context, plan);
 	string rendered = RenderAstTree(*ast);
 	Printer::RawPrint(OutputStream::STREAM_STDOUT, rendered);
 }
@@ -229,17 +236,9 @@ struct PrintAstBindData : public TableFunctionData {
 static unique_ptr<FunctionData> PrintAstTableBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<string> &names) {
 	auto query = StringValue::Get(input.inputs[0]);
+	auto plan = PlanQuery(context, query);
 
-	Parser parser;
-	parser.ParseQuery(query);
-	if (parser.statements.empty()) {
-		throw ParserException("Failed to parse query: %s", query);
-	}
-
-	Planner planner(context);
-	planner.CreatePlan(parser.statements[0]->Copy());
-
-	auto ast = LogicalPlanToAst(context, planner.plan);
+	auto ast = LogicalPlanToAst(context, plan);
 
 	auto result = make_uniq<PrintAstBindData>();
 	result->rendered = PrintAst(*ast);

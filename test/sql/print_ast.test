@@ -20,7 +20,7 @@ Project (table_index=1, expressions=3) |   t1_id <- t0_id |   t1_name <- t0_name
 query I
 SELECT replace(ast, chr(10), ' | ') FROM print_ast_query('SELECT * FROM users WHERE age > 25');
 ----
-Project (table_index=1, expressions=3) |   t1_id <- t0_id |   t1_name <- t0_name |   t1_age <- t0_age |   Filter (conditions=1) |     cond[0]: (t0_age) > (CAST(25 AS INTEGER)) |     Get memory.main.users (table_index=0) |       columns: [age, id, name]
+Project (table_index=1, expressions=3) |   t1_id <- t0_id |   t1_name <- t0_name |   t1_age <- t0_age |   Filter (conditions=1) |     cond[0]: (t0_age) > (25) |     Get memory.main.users (table_index=0) |       columns: [age, id, name]
 
 # Join — should produce Project → Aggregate → Join → Get + Get
 query I

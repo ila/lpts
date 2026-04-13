@@ -60,11 +60,111 @@ PRAGMA lpts_check('SELECT c_custkey, c_name, sum(l_extendedprice * (1 - l_discou
 true
 
 # ============================================================
+# Q7 — self-join on nation (n1/n2), N-ary OR: exercises BOUND_CONJUNCTION with >2 children
+# Operators: GET x6, FILTER, JOIN x5, PROJECT, AGGREGATE, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT supp_nation, cust_nation, l_year, sum(volume) AS revenue FROM (SELECT n1.n_name AS supp_nation, n2.n_name AS cust_nation, extract(year FROM l_shipdate) AS l_year, l_extendedprice * (1 - l_discount) AS volume FROM supplier, lineitem, orders, customer, nation n1, nation n2 WHERE s_suppkey = l_suppkey AND o_orderkey = l_orderkey AND c_custkey = o_custkey AND s_nationkey = n1.n_nationkey AND c_nationkey = n2.n_nationkey AND ((n1.n_name = ''FRANCE'' AND n2.n_name = ''GERMANY'') OR (n1.n_name = ''GERMANY'' AND n2.n_name = ''FRANCE'')) AND l_shipdate BETWEEN CAST(''1995-01-01'' AS DATE) AND CAST(''1996-12-31'' AS DATE)) AS shipping GROUP BY supp_nation, cust_nation, l_year ORDER BY supp_nation, cust_nation, l_year');
+----
+true
+
+# ============================================================
+# Q8 — 8-way join with CASE WHEN and subquery-derived market share
+# Operators: GET x8, FILTER x3, JOIN x7, PROJECT, AGGREGATE, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT o_year, sum(CASE WHEN nation = ''BRAZIL'' THEN volume ELSE 0 END) / sum(volume) AS mkt_share FROM (SELECT extract(year FROM o_orderdate) AS o_year, l_extendedprice * (1 - l_discount) AS volume, n2.n_name AS nation FROM part, supplier, lineitem, orders, customer, nation n1, nation n2, region WHERE p_partkey = l_partkey AND s_suppkey = l_suppkey AND l_orderkey = o_orderkey AND o_custkey = c_custkey AND c_nationkey = n1.n_nationkey AND n1.n_regionkey = r_regionkey AND r_name = ''AMERICA'' AND s_nationkey = n2.n_nationkey AND o_orderdate BETWEEN CAST(''1995-01-01'' AS DATE) AND CAST(''1996-12-31'' AS DATE) AND p_type = ''ECONOMY ANODIZED STEEL'') AS all_nations GROUP BY o_year ORDER BY o_year');
+----
+true
+
+# ============================================================
+# Q9 — 6-way join with arithmetic in aggregate
+# Operators: GET x6, FILTER, JOIN x5, AGGREGATE, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT nation, o_year, sum(amount) AS sum_profit FROM (SELECT n_name AS nation, extract(year FROM o_orderdate) AS o_year, l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity AS amount FROM part, supplier, lineitem, partsupp, orders, nation WHERE s_suppkey = l_suppkey AND ps_suppkey = l_suppkey AND ps_partkey = l_partkey AND p_partkey = l_partkey AND o_orderkey = l_orderkey AND s_nationkey = n_nationkey AND p_name LIKE ''%green%'') AS profit GROUP BY nation, o_year ORDER BY nation, o_year DESC');
+----
+true
+
+# ============================================================
+# Q11 — scalar subquery in HAVING (decorrelated to CROSS JOIN)
+# Operators: GET x3, FILTER, JOIN x2, AGGREGATE, CROSS_PRODUCT, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT ps_partkey, sum(ps_supplycost * ps_availqty) AS value FROM partsupp, supplier, nation WHERE ps_suppkey = s_suppkey AND s_nationkey = n_nationkey AND n_name = ''GERMANY'' GROUP BY ps_partkey HAVING sum(ps_supplycost * ps_availqty) > (SELECT sum(ps_supplycost * ps_availqty) * 0.0001 FROM partsupp, supplier, nation WHERE ps_suppkey = s_suppkey AND s_nationkey = n_nationkey AND n_name = ''GERMANY'') ORDER BY value DESC');
+----
+true
+
+# ============================================================
 # Q12 — CASE WHEN + IN list: exercises BOUND_CASE + BOUND_OPERATOR(COMPARE_IN)
 # Operators: GET, FILTER, JOIN, AGGREGATE, ORDER
 # ============================================================
 
 query I
 PRAGMA lpts_check('SELECT l_shipmode, sum(CASE WHEN o_orderpriority = ''1-URGENT'' OR o_orderpriority = ''2-HIGH'' THEN 1 ELSE 0 END) AS high_line_count, sum(CASE WHEN o_orderpriority <> ''1-URGENT'' AND o_orderpriority <> ''2-HIGH'' THEN 1 ELSE 0 END) AS low_line_count FROM orders, lineitem WHERE o_orderkey = l_orderkey AND l_shipmode IN (''MAIL'', ''SHIP'') AND l_commitdate < l_receiptdate AND l_shipdate < l_commitdate AND l_receiptdate >= CAST(''1994-01-01'' AS DATE) AND l_receiptdate < CAST(''1995-01-01'' AS DATE) GROUP BY l_shipmode ORDER BY l_shipmode');
+----
+true
+
+# ============================================================
+# Q13 — LEFT OUTER JOIN with NOT LIKE join condition
+# Operators: GET x2, FILTER, LEFT JOIN, AGGREGATE x2, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT c_count, count(*) AS custdist FROM (SELECT c_custkey, count(o_orderkey) FROM customer LEFT OUTER JOIN orders ON c_custkey = o_custkey AND o_comment NOT LIKE ''%special%requests%'' GROUP BY c_custkey) AS c_orders (c_custkey, c_count) GROUP BY c_count ORDER BY custdist DESC, c_count DESC');
+----
+true
+
+# ============================================================
+# Q14 — LIKE ''PROMO%'' in CASE WHEN, single aggregate with division
+# Operators: GET x2, FILTER, JOIN, AGGREGATE
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT 100.00 * sum(CASE WHEN p_type LIKE ''PROMO%'' THEN l_extendedprice * (1 - l_discount) ELSE 0 END) / sum(l_extendedprice * (1 - l_discount)) AS promo_revenue FROM lineitem, part WHERE l_partkey = p_partkey AND l_shipdate >= CAST(''1995-09-01'' AS DATE) AND l_shipdate < CAST(''1995-10-01'' AS DATE)');
+----
+true
+
+# ============================================================
+# Q15 — WITH CTE used twice (LOGICAL_MATERIALIZED_CTE + LOGICAL_CTE_REF)
+# Operators: GET, FILTER, AGGREGATE, MATERIALIZED_CTE, CTE_REF x2, JOIN x2, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('WITH revenue (supplier_no, total_revenue) AS (SELECT l_suppkey, sum(l_extendedprice * (1 - l_discount)) FROM lineitem WHERE l_shipdate >= CAST(''1996-01-01'' AS DATE) AND l_shipdate < CAST(''1996-04-01'' AS DATE) GROUP BY l_suppkey) SELECT s_suppkey, s_name, s_address, s_phone, total_revenue FROM supplier, revenue WHERE s_suppkey = supplier_no AND total_revenue = (SELECT max(total_revenue) FROM revenue) ORDER BY s_suppkey');
+----
+true
+
+# ============================================================
+# Q16 — p_size IN (8 values) → LOGICAL_CHUNK_GET + MARK join; NOT IN subquery → ANTI join
+# Operators: GET x3, FILTER, JOIN, CHUNK_GET, MARK→LEFT join, ANTI join, AGGREGATE, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT p_brand, p_type, p_size, count(DISTINCT ps_suppkey) AS supplier_cnt FROM partsupp, part WHERE p_partkey = ps_partkey AND p_brand <> ''Brand#45'' AND p_type NOT LIKE ''MEDIUM POLISHED%'' AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9) AND ps_suppkey NOT IN (SELECT s_suppkey FROM supplier WHERE s_comment LIKE ''%Customer%Complaints%'') GROUP BY p_brand, p_type, p_size ORDER BY supplier_cnt DESC, p_brand, p_type, p_size');
+----
+true
+
+# ============================================================
+# Q18 — IN subquery with GROUP BY + HAVING: exercises MARK join + aggregate
+# Operators: GET x3, AGGREGATE, FILTER, JOIN x2, MARK→LEFT join, AGGREGATE, ORDER, LIMIT
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum(l_quantity) FROM customer, orders, lineitem WHERE o_orderkey IN (SELECT l_orderkey FROM lineitem GROUP BY l_orderkey HAVING sum(l_quantity) > 300) AND c_custkey = o_custkey AND o_orderkey = l_orderkey GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice ORDER BY o_totalprice DESC, o_orderdate LIMIT 100');
+----
+true
+
+# ============================================================
+# Q19 — N-ary OR filter (3 brand groups): exercises BOUND_CONJUNCTION with >2 children
+# Operators: GET x2, FILTER, JOIN, AGGREGATE
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT sum(l_extendedprice * (1 - l_discount)) AS revenue FROM lineitem, part WHERE (p_partkey = l_partkey AND p_brand = ''Brand#12'' AND p_container IN (''SM CASE'', ''SM BOX'', ''SM PACK'', ''SM PKG'') AND l_quantity >= 1 AND l_quantity <= 11 AND p_size BETWEEN 1 AND 5 AND l_shipmode IN (''AIR'', ''AIR REG'') AND l_shipinstruct = ''DELIVER IN PERSON'') OR (p_partkey = l_partkey AND p_brand = ''Brand#23'' AND p_container IN (''MED BAG'', ''MED BOX'', ''MED PKG'', ''MED PACK'') AND l_quantity >= 10 AND l_quantity <= 20 AND p_size BETWEEN 1 AND 10 AND l_shipmode IN (''AIR'', ''AIR REG'') AND l_shipinstruct = ''DELIVER IN PERSON'') OR (p_partkey = l_partkey AND p_brand = ''Brand#34'' AND p_container IN (''LG CASE'', ''LG BOX'', ''LG PACK'', ''LG PKG'') AND l_quantity >= 20 AND l_quantity <= 30 AND p_size BETWEEN 1 AND 15 AND l_shipmode IN (''AIR'', ''AIR REG'') AND l_shipinstruct = ''DELIVER IN PERSON'')');
 ----
 true

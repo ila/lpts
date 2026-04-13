@@ -290,6 +290,42 @@ string AstDistinctNode::ToString(int indent) const {
 }
 
 //------------------------------------------------------------------------------
+// AstMaterializedCteNode
+//------------------------------------------------------------------------------
+
+string AstMaterializedCteNode::ToString(int indent) const {
+	string result = Indent(indent) + "MaterializedCte (cte_table_index=" + std::to_string(cte_table_index) + ")";
+	if (children.size() >= 1) {
+		result += "\n" + Indent(indent + 2) + "body:";
+		result += "\n" + children[0]->ToString(indent + 4);
+	}
+	if (children.size() >= 2) {
+		result += "\n" + Indent(indent + 2) + "outer:";
+		result += "\n" + children[1]->ToString(indent + 4);
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
+// AstCteRefNode
+//------------------------------------------------------------------------------
+
+string AstCteRefNode::ToString(int indent) const {
+	string result = Indent(indent) + "CteRef (cte_table_index=" + std::to_string(cte_table_index) + ")";
+	if (!cte_column_names.empty()) {
+		result += "\n" + Indent(indent + 2) + "columns: [";
+		for (size_t i = 0; i < cte_column_names.size(); i++) {
+			if (i > 0) {
+				result += ", ";
+			}
+			result += cte_column_names[i];
+		}
+		result += "]";
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
 // PrintAst — free function
 //------------------------------------------------------------------------------
 

@@ -7,6 +7,7 @@
 
 #include "cte_nodes.hpp"
 #include "lpts_helpers.hpp"
+#include "lpts_debug.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"
@@ -193,7 +194,16 @@ string JoinNode::ToQuery() {
 		throw NotImplementedException("JoinType::%s is not (yet) supported", EnumUtil::ToString(join_type));
 	}
 	join_str << " JOIN ";
-	join_str << right_cte_name;
+	// MARK→LEFT joins: deduplicate the right side to prevent left-row multiplication
+	// when the RHS has duplicate matching values. IN subquery semantics treat the RHS
+	// as a set, so (SELECT DISTINCT * FROM rhs) preserves correctness.
+	if (!mark_expression.empty()) {
+		LPTS_DEBUG_PRINT("[LPTS-CTE] MARK join: wrapping right CTE '" + right_cte_name +
+		                 "' in SELECT DISTINCT to prevent duplicate rows");
+		join_str << "(SELECT DISTINCT * FROM " << right_cte_name << ") AS _rhs_dedup";
+	} else {
+		join_str << right_cte_name;
+	}
 	join_str << " ON ";
 	join_str << VecToSeparatedList(join_conditions, " AND ");
 	return join_str.str();

@@ -46,7 +46,7 @@ D PRAGMA lpts('SELECT name FROM users WHERE age > 25');
 
 ```bash
 GEN=ninja make          # build (release)
-cmake format-fix        # auto-format all source files (run before committing)
+make format-fix         # auto-format all source files (run before committing)
 
 make shell              # launch DuckDB shell with lpts extension loaded
 make unittest           # run all SQL logic tests
@@ -271,7 +271,7 @@ Use `PRAGMA lpts(...)` to see the full CTE SQL output, and `PRAGMA print_ast(...
 
 ## Code style (clang-format / clang-tidy)
 
-Run `cmake format-fix` to auto-format. The project uses DuckDB's `.clang-format` (LLVM-based):
+Run `make format-fix` to auto-format. The project uses DuckDB's `.clang-format` (LLVM-based):
 
 - **Classes/Enums**: `CamelCase` (e.g., `AstGetNode`, `SqlDialect`)
 - **Functions**: `CamelCase` (e.g., `LogicalPlanToAst`, `AstToCteList`)

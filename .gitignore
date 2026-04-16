@@ -9,3 +9,4 @@ test/python/__pycache__/
 test.db.wal
 test.db
 tpch-umbra-flat-cte-list.txt
+.cache/

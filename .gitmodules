@@ -6,9 +6,6 @@
 	path = extension-ci-tools
 	url = https://github.com/duckdb/extension-ci-tools
 	branch = main
-[submodule ".claude/skills/shared"]
-	path = .claude/skills/shared
-	url = https://github.com/ila/duckdb-claude-skills.git
 [submodule "third_party/ducklake"]
 	path = third_party/ducklake
 	url = https://github.com/duckdb/ducklake.git

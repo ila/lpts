@@ -4,6 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Working with the user
 
+**Before making any changes**, sync the repo:
+```bash
+git pull                                      # pull latest commits
+git submodule update --init --recursive       # update submodules to pinned commits
+git -C duckdb checkout v1.5.0                 # ensure duckdb is on the required tag
+```
+
 When you're stuck — either unable to fix a bug after 2-3 attempts, or tempted to work around the actual problem by redefining the objective — **stop and ask the user for directions**. Explain clearly what the specific problem is (e.g., "AstToCteList produces wrong column names for a 3-way join — should I fix the AstJoinNode output ordering or adjust the CTE binding map?"). The user knows this codebase deeply and can often point you to the right solution in one sentence. Do not silently change the goal, declare something impossible, or add bloated workarounds without consulting first. We work as a team.
 
 Always test your changes with real queries (e.g., create a table, run `PRAGMA lpts(...)`, check the SQL output, then run `PRAGMA lpts_exec(...)` to verify results) before declaring success, not just unit tests.
@@ -19,6 +26,7 @@ Never execute git commands that could lose code. Always ask the user for permiss
 - **Before implementing anything, search the existing codebase** for similar patterns or solutions. Check `src/logical_plan_to_sql.cpp` (`CreateCteNode`) as the canonical reference for operator-specific logic. Reuse before reinventing.
 - **Use helper functions.** Factor shared logic into helpers. Check `src/lpts_helpers.cpp` and `src/include/lpts_helpers.hpp` for existing utilities (`VecToSeparatedList`, `EscapeSingleQuotes`, etc.).
 - **Never edit the `duckdb/` submodule.** The DuckDB source is read-only. All LPTS logic lives in `src/` and `test/`.
+- **The `duckdb/` submodule must stay on release tag `v1.5.0`.** Never advance or downgrade it without explicit instruction. If it drifts, run `git -C duckdb checkout v1.5.0` to restore it.
 - **Add `LPTS_DEBUG_PRINT` statements** at key processing points (entry into each operator case, before/after CTE node creation, at pipeline boundaries). Use the existing macro from `src/include/lpts_debug.hpp` — it is compiled out when `LPTS_DEBUG` is 0.
 - **The existing `logical_plan_to_sql.cpp` is your reference.** When implementing new AST or pipeline logic, use `CreateCteNode()` in `src/logical_plan_to_sql.cpp` as the ground truth for how each operator's data should be extracted and serialized.
 

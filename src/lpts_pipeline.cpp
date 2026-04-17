@@ -242,10 +242,20 @@ private:
 				expr_str << ExpressionToAliasedString(func_expr.children[1]);
 				expr_str << ")";
 			} else {
+				// struct_pack uses `field := expr` syntax; field names live in the
+				// return type, not in the children. Emitting bare children loses the
+				// names — the re-binder then uses each child's column alias (e.g.
+				// "t0_I_NAME") as the struct field name.
+				const bool is_struct_pack = (func_name == "struct_pack" || func_name == "row") &&
+				                            func_expr.return_type.id() == LogicalTypeId::STRUCT &&
+				                            !StructType::IsUnnamed(func_expr.return_type);
 				expr_str << func_name << "(";
 				for (idx_t i = 0; i < child_count; i++) {
 					if (i > 0) {
 						expr_str << ", ";
+					}
+					if (is_struct_pack && i < StructType::GetChildCount(func_expr.return_type)) {
+						expr_str << "\"" << StructType::GetChildName(func_expr.return_type, i) << "\" := ";
 					}
 					expr_str << ExpressionToAliasedString(func_expr.children[i]);
 				}

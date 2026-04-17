@@ -750,6 +750,12 @@ private:
 					}
 				}
 				agg_str << ")";
+				// Preserve FILTER (WHERE predicate) clause. Without this, a view query
+				// with `COUNT(*) FILTER (WHERE x > 0)` round-trips to `count_star()`,
+				// silently producing a total row count instead of a conditional count.
+				if (ba.filter) {
+					agg_str << " FILTER (WHERE " << ExpressionToAliasedString(ba.filter) << ")";
+				}
 				string agg_alias = "aggregate_" + std::to_string(i);
 				agg_expressions.push_back(agg_str.str());
 				auto new_col = make_uniq<ColStruct>(agg_table_index, agg_str.str(), std::move(agg_alias));

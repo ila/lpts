@@ -725,6 +725,30 @@ private:
 						agg_str << ", ";
 					agg_str << child_exprs[ci];
 				}
+				// Preserve intra-aggregate ORDER BY — matters for LIST, STRING_AGG,
+				// and other order-sensitive aggregates. Drop it only for aggregates
+				// whose result is order-independent (sum/count/min/max/avg), since
+				// rendering ORDER BY for those would change the plan for no reason.
+				if (ba.order_bys && !ba.order_bys->orders.empty() && agg_name != "sum" && agg_name != "count" &&
+				    agg_name != "count_star" && agg_name != "min" && agg_name != "max" && agg_name != "avg") {
+					agg_str << " ORDER BY ";
+					for (size_t oi = 0; oi < ba.order_bys->orders.size(); ++oi) {
+						const BoundOrderByNode &ob = ba.order_bys->orders[oi];
+						if (oi > 0)
+							agg_str << ", ";
+						agg_str << ExpressionToAliasedString(ob.expression);
+						if (ob.type == OrderType::DESCENDING) {
+							agg_str << " DESC";
+						} else if (ob.type == OrderType::ASCENDING) {
+							agg_str << " ASC";
+						}
+						if (ob.null_order == OrderByNullType::NULLS_FIRST) {
+							agg_str << " NULLS FIRST";
+						} else if (ob.null_order == OrderByNullType::NULLS_LAST) {
+							agg_str << " NULLS LAST";
+						}
+					}
+				}
 				agg_str << ")";
 				string agg_alias = "aggregate_" + std::to_string(i);
 				agg_expressions.push_back(agg_str.str());

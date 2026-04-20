@@ -201,3 +201,15 @@ query I
 PRAGMA lpts_check('SELECT a, b FROM range(1, 4) t1(a), range(10, 13) t2(b)');
 ----
 true
+
+# --- struct_pack preserves named field names across round-trip ---
+
+query I
+PRAGMA lpts_check('SELECT struct_pack(name := name, n := age) FROM users');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT struct_pack(a := id, b := name, c := age) FROM users');
+----
+true

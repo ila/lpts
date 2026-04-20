@@ -168,3 +168,30 @@ query I
 PRAGMA lpts_check('SELECT id FROM users UNION ALL SELECT id FROM staff UNION ALL SELECT user_id FROM orders UNION ALL SELECT val FROM extra');
 ----
 true
+
+# --- N-ary UNION with aggregate on top (regression) ---
+# The AstFlattener splits N-ary UNION into left-deep binary UNIONs and appends
+# intermediate CTEs to cte_nodes. Parent operators must reference each child
+# CTE by NAME — not by cte_nodes[child->idx] — because the intermediate insertion
+# breaks the idx==vector-position invariant.
+query I
+PRAGMA lpts_check('SELECT COUNT(*) FROM (SELECT id FROM users UNION ALL SELECT id FROM staff UNION ALL SELECT user_id FROM orders) t');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT id, COUNT(*) FROM (SELECT id FROM users UNION ALL SELECT id FROM staff UNION ALL SELECT user_id FROM orders) t GROUP BY id');
+----
+true
+
+# --- N-ary UNION (implicit DISTINCT) with aggregate on top ---
+query I
+PRAGMA lpts_check('SELECT COUNT(*) FROM (SELECT id FROM users UNION SELECT id FROM staff UNION SELECT user_id FROM orders) t');
+----
+true
+
+# --- Plain N-ary UNION (implicit DISTINCT) ---
+query I
+PRAGMA lpts_check('SELECT id FROM users UNION SELECT id FROM staff UNION SELECT user_id FROM orders');
+----
+true

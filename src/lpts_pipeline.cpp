@@ -249,10 +249,20 @@ private:
 				expr_str << ExpressionToAliasedString(func_expr.children[1]);
 				expr_str << ")";
 			} else {
+				// struct_pack uses `field := expr` syntax; field names live in the
+				// return type, not in the children. Emitting bare children loses the
+				// names — the re-binder then uses each child's column alias (e.g.
+				// "t0_I_NAME") as the struct field name.
+				const bool is_struct_pack = (func_name == "struct_pack" || func_name == "row") &&
+				                            func_expr.return_type.id() == LogicalTypeId::STRUCT &&
+				                            !StructType::IsUnnamed(func_expr.return_type);
 				expr_str << func_name << "(";
 				for (idx_t i = 0; i < child_count; i++) {
 					if (i > 0) {
 						expr_str << ", ";
+					}
+					if (is_struct_pack && i < StructType::GetChildCount(func_expr.return_type)) {
+						expr_str << "\"" << StructType::GetChildName(func_expr.return_type, i) << "\" := ";
 					}
 					expr_str << ExpressionToAliasedString(func_expr.children[i]);
 				}
@@ -732,7 +742,37 @@ private:
 						agg_str << ", ";
 					agg_str << child_exprs[ci];
 				}
+				// Preserve intra-aggregate ORDER BY — matters for LIST, STRING_AGG,
+				// and other order-sensitive aggregates. Drop it only for aggregates
+				// whose result is order-independent (sum/count/min/max/avg), since
+				// rendering ORDER BY for those would change the plan for no reason.
+				if (ba.order_bys && !ba.order_bys->orders.empty() && agg_name != "sum" && agg_name != "count" &&
+				    agg_name != "count_star" && agg_name != "min" && agg_name != "max" && agg_name != "avg") {
+					agg_str << " ORDER BY ";
+					for (size_t oi = 0; oi < ba.order_bys->orders.size(); ++oi) {
+						const BoundOrderByNode &ob = ba.order_bys->orders[oi];
+						if (oi > 0)
+							agg_str << ", ";
+						agg_str << ExpressionToAliasedString(ob.expression);
+						if (ob.type == OrderType::DESCENDING) {
+							agg_str << " DESC";
+						} else if (ob.type == OrderType::ASCENDING) {
+							agg_str << " ASC";
+						}
+						if (ob.null_order == OrderByNullType::NULLS_FIRST) {
+							agg_str << " NULLS FIRST";
+						} else if (ob.null_order == OrderByNullType::NULLS_LAST) {
+							agg_str << " NULLS LAST";
+						}
+					}
+				}
 				agg_str << ")";
+				// Preserve FILTER (WHERE predicate) clause. Without this, a view query
+				// with `COUNT(*) FILTER (WHERE x > 0)` round-trips to `count_star()`,
+				// silently producing a total row count instead of a conditional count.
+				if (ba.filter) {
+					agg_str << " FILTER (WHERE " << ExpressionToAliasedString(ba.filter) << ")";
+				}
 				string agg_alias = "aggregate_" + std::to_string(i);
 				agg_expressions.push_back(agg_str.str());
 				auto new_col = make_uniq<ColStruct>(agg_table_index, agg_str.str(), std::move(agg_alias));
@@ -1157,12 +1197,15 @@ private:
 			                          vector<string>(), body_lpts_cols);
 		}
 
-		// 1. Recurse into children first (post-order), collecting their indices
-		//    and CTE names for use when constructing the parent's CteNode.
-		vector<size_t> children_indices;
+		// 1. Recurse into children first (post-order), remembering each child's CTE
+		//    name so the parent can reference it by name. We keep the name (not the
+		//    child's idx) because UNION flattening may insert intermediate CTEs into
+		//    cte_nodes; once that happens, a child's idx no longer equals its vector
+		//    position, and `cte_nodes[idx]` silently picks up the wrong CTE.
+		vector<string> children_names;
 		for (const auto &child : ast_node.children) {
 			unique_ptr<CteNode> child_cte = FlattenNode(*child);
-			children_indices.push_back(child_cte->idx);
+			children_names.push_back(child_cte->cte_name);
 			cte_nodes.push_back(std::move(child_cte));
 		}
 
@@ -1184,46 +1227,39 @@ private:
 		if (type == "Filter") {
 			const AstFilterNode &filter = static_cast<const AstFilterNode &>(ast_node);
 			// FilterNode has no explicit CTE column list (it does SELECT * FROM child).
-			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			return make_uniq<FilterNode>(my_index, vector<string>(), child_cte_name, filter.conditions);
+			return make_uniq<FilterNode>(my_index, vector<string>(), children_names[0], filter.conditions);
 		}
 
 		if (type == "Project") {
 			const AstProjectNode &proj = static_cast<const AstProjectNode &>(ast_node);
-			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			return make_uniq<ProjectNode>(my_index, proj.cte_column_names, child_cte_name, proj.expressions,
+			return make_uniq<ProjectNode>(my_index, proj.cte_column_names, children_names[0], proj.expressions,
 			                              proj.table_index);
 		}
 
 		if (type == "Aggregate") {
 			const AstAggregateNode &agg = static_cast<const AstAggregateNode &>(ast_node);
-			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			return make_uniq<AggregateNode>(my_index, agg.cte_column_names, child_cte_name, agg.group_by_columns,
+			return make_uniq<AggregateNode>(my_index, agg.cte_column_names, children_names[0], agg.group_by_columns,
 			                                agg.aggregate_expressions);
 		}
 
 		if (type == "Join") {
 			const AstJoinNode &join = static_cast<const AstJoinNode &>(ast_node);
-			const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
-			return make_uniq<JoinNode>(my_index, join.cte_column_names, left_cte_name, right_cte_name, join.join_type,
-			                           join.conditions, join.mark_expression);
+			return make_uniq<JoinNode>(my_index, join.cte_column_names, children_names[0], children_names[1],
+			                           join.join_type, join.conditions, join.mark_expression);
 		}
 
 		if (type == "Union") {
 			const AstUnionNode &u = static_cast<const AstUnionNode &>(ast_node);
-			if (children_indices.size() == 2) {
-				const string &left_cte_name = cte_nodes[children_indices[0]]->cte_name;
-				const string &right_cte_name = cte_nodes[children_indices[1]]->cte_name;
-				return make_uniq<UnionNode>(my_index, u.cte_column_names, left_cte_name, right_cte_name,
+			if (children_names.size() == 2) {
+				return make_uniq<UnionNode>(my_index, u.cte_column_names, children_names[0], children_names[1],
 				                            u.is_union_all);
 			}
 			// N-ary UNION: chain as left-deep binary UNIONs
 			// (A UNION B UNION C) → UNION(UNION(A, B), C)
-			string prev_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			for (size_t ci = 1; ci < children_indices.size(); ci++) {
-				const string &right_cte_name = cte_nodes[children_indices[ci]]->cte_name;
-				if (ci < children_indices.size() - 1) {
+			string prev_cte_name = children_names[0];
+			for (size_t ci = 1; ci < children_names.size(); ci++) {
+				const string &right_cte_name = children_names[ci];
+				if (ci < children_names.size() - 1) {
 					// Intermediate union — create a CTE and add to cte_nodes
 					size_t intermediate_index = node_count++;
 					auto intermediate = make_uniq<UnionNode>(intermediate_index, u.cte_column_names, prev_cte_name,
@@ -1242,20 +1278,17 @@ private:
 
 		if (type == "Order") {
 			const AstOrderNode &o = static_cast<const AstOrderNode &>(ast_node);
-			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			return make_uniq<OrderNode>(my_index, o.cte_column_names, child_cte_name, o.order_items);
+			return make_uniq<OrderNode>(my_index, o.cte_column_names, children_names[0], o.order_items);
 		}
 
 		if (type == "Limit") {
 			const AstLimitNode &l = static_cast<const AstLimitNode &>(ast_node);
-			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			return make_uniq<LimitNode>(my_index, l.cte_column_names, child_cte_name, l.limit_str, l.offset_str);
+			return make_uniq<LimitNode>(my_index, l.cte_column_names, children_names[0], l.limit_str, l.offset_str);
 		}
 
 		if (type == "Distinct") {
 			const AstDistinctNode &d = static_cast<const AstDistinctNode &>(ast_node);
-			const string &child_cte_name = cte_nodes[children_indices[0]]->cte_name;
-			return make_uniq<DistinctNode>(my_index, d.cte_column_names, child_cte_name);
+			return make_uniq<DistinctNode>(my_index, d.cte_column_names, children_names[0]);
 		}
 
 		// Operators not yet implemented.

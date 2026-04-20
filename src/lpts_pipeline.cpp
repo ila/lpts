@@ -49,6 +49,9 @@
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
+#include "duckdb/planner/operator/logical_column_data_get.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 namespace duckdb {
@@ -196,13 +199,17 @@ private:
 		}
 		case ExpressionClass::BOUND_CONJUNCTION: {
 			const BoundConjunctionExpression &conj = expression->Cast<BoundConjunctionExpression>();
+			// BoundConjunctionExpression can have N children (N ≥ 2).
+			// Serialize as: (child[0]) OP (child[1]) OP ... OP (child[N-1]).
+			string op = ExpressionTypeToOperator(conj.GetExpressionType());
 			expr_str << "(";
 			expr_str << ExpressionToAliasedString(conj.children[0]);
-			expr_str << ") ";
-			expr_str << ExpressionTypeToOperator(conj.GetExpressionType());
-			expr_str << " (";
-			expr_str << ExpressionToAliasedString(conj.children[1]);
 			expr_str << ")";
+			for (size_t ci = 1; ci < conj.children.size(); ci++) {
+				expr_str << " " << op << " (";
+				expr_str << ExpressionToAliasedString(conj.children[ci]);
+				expr_str << ")";
+			}
 			break;
 		}
 		case ExpressionClass::BOUND_FUNCTION: {
@@ -791,7 +798,11 @@ private:
 			// MARK joins produce an extra boolean column indicating match existence.
 			// In SQL: LEFT JOIN + (right_key IS NOT NULL) as a computed column.
 			// We register it with a clean alias so parent CTEs can reference it.
+			// The right side is wrapped in SELECT DISTINCT at SQL generation time
+			// to prevent left-row duplication when the RHS has repeated values.
 			if (join_op.join_type == JoinType::MARK) {
+				LPTS_DEBUG_PRINT("[LPTS-AST] MARK join detected: mark_index=" + std::to_string(join_op.mark_index) +
+				                 " conditions=" + std::to_string(join_op.conditions.size()));
 				ColumnBinding mark_cb(join_op.mark_index, 0);
 				string mark_expr;
 				if (!join_op.conditions.empty()) {
@@ -799,6 +810,7 @@ private:
 				} else {
 					mark_expr = "true";
 				}
+				LPTS_DEBUG_PRINT("[LPTS-AST] MARK join: registering mark column as '" + mark_expr + "'");
 				auto mark_col = make_uniq<ColStruct>(join_op.mark_index, mark_expr, "_mark");
 				column_map[MappableColumnBinding(mark_cb)] = std::move(mark_col);
 			}
@@ -820,6 +832,7 @@ private:
 				if (it != column_map.end()) {
 					mark_expr = it->second->column_name; // contains the IS NOT NULL expression
 				}
+				LPTS_DEBUG_PRINT("[LPTS-AST] MARK join: converting to LEFT join, mark_expr='" + mark_expr + "'");
 			}
 			return make_uniq<AstJoinNode>(sql_join_type, std::move(conditions), std::move(cte_column_names),
 			                              std::move(mark_expr));
@@ -939,6 +952,90 @@ private:
 			                             std::move(filters));
 		}
 
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_CHUNK_GET: {
+			// CHUNK_GET holds a materialized ColumnDataCollection of constant scalar values.
+			// Created by the optimizer for IN lists with ≥6 constant elements.
+			// We emit the values as a (VALUES ...) subquery so GetNode::ToQuery() renders it
+			// as: SELECT c0 FROM (VALUES (v1), (v2), ...) _tf(c0)
+			const LogicalColumnDataGet &chunk_get = op->Cast<LogicalColumnDataGet>();
+			const idx_t table_index = chunk_get.table_index;
+			const auto &types = chunk_get.chunk_types;
+
+			LPTS_DEBUG_PRINT("[LPTS-AST] CHUNK_GET: table_index=" + std::to_string(table_index) + " types=" +
+			                 std::to_string(types.size()) + " rows=" + std::to_string(chunk_get.collection->Count()));
+
+			// Synthetic column names c0, c1, … for the VALUES columns.
+			vector<string> column_names;
+			vector<string> cte_column_names;
+			for (size_t i = 0; i < types.size(); ++i) {
+				string col_name = "c" + std::to_string(i);
+				auto col_struct = make_uniq<ColStruct>(table_index, col_name, "");
+				cte_column_names.push_back(col_struct->ToUniqueColumnName());
+				column_names.push_back(col_name);
+				column_map[MappableColumnBinding(ColumnBinding(table_index, i))] = std::move(col_struct);
+			}
+
+			// Materialize VALUES from the collection.
+			auto rows = chunk_get.collection->GetRows();
+			std::ostringstream values_str;
+			values_str << "(VALUES ";
+			for (idx_t row_idx = 0; row_idx < rows.size(); ++row_idx) {
+				if (row_idx > 0) {
+					values_str << ", ";
+				}
+				values_str << "(";
+				for (idx_t col_idx = 0; col_idx < types.size(); ++col_idx) {
+					if (col_idx > 0) {
+						values_str << ", ";
+					}
+					values_str << rows.GetValue(col_idx, row_idx).ToSQLString();
+				}
+				values_str << ")";
+			}
+			values_str << ")";
+
+			LPTS_DEBUG_PRINT("[LPTS-AST] CHUNK_GET: emitting VALUES: " + values_str.str());
+
+			// GetNode::ToQuery detects '(' in table_name and appends _tf(col_names) alias.
+			return make_uniq<AstGetNode>("", "", values_str.str(), table_index, std::move(column_names),
+			                             std::move(cte_column_names), vector<string>());
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_CTE_REF: {
+			// CTE_REF is a scan of a materialized CTE body (used when a WITH clause CTE
+			// is referenced more than once). The actual body CTE name is resolved in Phase 2.
+			const LogicalCTERef &cte_ref = op->Cast<LogicalCTERef>();
+			const idx_t table_index = cte_ref.table_index;
+			const idx_t cte_index = cte_ref.cte_index;
+
+			LPTS_DEBUG_PRINT("[LPTS-AST] CTE_REF: table_index=" + std::to_string(table_index) + " cte_index=" +
+			                 std::to_string(cte_index) + " columns=" + std::to_string(cte_ref.bound_columns.size()));
+
+			// Register output columns using the CTE's user-visible column names.
+			vector<string> cte_column_names;
+			for (size_t i = 0; i < cte_ref.bound_columns.size(); ++i) {
+				const string &col_name = cte_ref.bound_columns[i];
+				auto col_struct = make_uniq<ColStruct>(table_index, col_name, "");
+				cte_column_names.push_back(col_struct->ToUniqueColumnName());
+				column_map[MappableColumnBinding(ColumnBinding(table_index, i))] = std::move(col_struct);
+			}
+
+			return make_uniq<AstCteRefNode>(cte_index, std::move(cte_column_names));
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_MATERIALIZED_CTE: {
+			// MATERIALIZED_CTE wraps a CTE body (children[0]) and outer query (children[1]).
+			// AstMaterializedCteNode preserves the ordering so Phase 2 can flatten the body
+			// first and make the body CTE name available for CteRef resolution.
+			const LogicalMaterializedCTE &mat_cte = op->Cast<LogicalMaterializedCTE>();
+			LPTS_DEBUG_PRINT("[LPTS-AST] MATERIALIZED_CTE: table_index=" + std::to_string(mat_cte.table_index) +
+			                 " ctename='" + mat_cte.ctename + "'");
+			return make_uniq<AstMaterializedCteNode>(mat_cte.table_index);
+		}
+
 		default:
 			throw NotImplementedException("AstBuilder: operator '%s' is not yet implemented",
 			                              LogicalOperatorToString(op->type));
@@ -1036,6 +1133,11 @@ private:
 	vector<unique_ptr<CteNode>> cte_nodes;
 	SqlDialect dialect; // Controls dialect-specific SQL rendering.
 
+	/// Maps LogicalMaterializedCTE::table_index → (lpts_cte_name, lpts_cte_column_list)
+	/// of the last CTE generated for the body. Populated when flattening AstMaterializedCteNode;
+	/// consumed when flattening AstCteRefNode.
+	unordered_map<idx_t, pair<string, vector<string>>> cte_index_to_body_info;
+
 	/// Compute the CTE name for a given node type and index.
 	static string CteName(const AstNode &node, size_t index) {
 		const string &type = node.NodeType();
@@ -1060,6 +1162,41 @@ private:
 	// FlattenNode: post-order walk → produce CteNode for each AstNode
 	//--------------------------------------------------------------------------
 	unique_ptr<CteNode> FlattenNode(const AstNode &ast_node) {
+		const string &type = ast_node.NodeType();
+
+		// MaterializedCte: must flatten body first, store body info, then flatten outer query.
+		// This ordering ensures CteRef nodes in the outer query can resolve the body CTE name.
+		if (type == "MaterializedCte") {
+			const AstMaterializedCteNode &mat = static_cast<const AstMaterializedCteNode &>(ast_node);
+			LPTS_DEBUG_PRINT("[LPTS-CTE] MaterializedCte: flattening body (cte_table_index=" +
+			                 std::to_string(mat.cte_table_index) + ")");
+			unique_ptr<CteNode> body_last = FlattenNode(*ast_node.children[0]);
+			cte_index_to_body_info[mat.cte_table_index] = {body_last->cte_name, body_last->cte_column_list};
+			cte_nodes.push_back(std::move(body_last));
+			LPTS_DEBUG_PRINT("[LPTS-CTE] MaterializedCte: body stored as '" +
+			                 cte_index_to_body_info[mat.cte_table_index].first + "', flattening outer query");
+			return FlattenNode(*ast_node.children[1]);
+		}
+
+		// CteRef: leaf node — create a GetNode that reads from the materialized body CTE.
+		// The body's LPTS column names become the SELECT list; this CTE's column names become the header.
+		if (type == "CteRef") {
+			const AstCteRefNode &cte_ref_node = static_cast<const AstCteRefNode &>(ast_node);
+			auto it = cte_index_to_body_info.find(cte_ref_node.cte_table_index);
+			if (it == cte_index_to_body_info.end()) {
+				throw InternalException("LPTS: CteRef references unknown materialized CTE index %llu",
+				                        (unsigned long long)cte_ref_node.cte_table_index);
+			}
+			const string &body_lpts_name = it->second.first;
+			const vector<string> &body_lpts_cols = it->second.second;
+			const size_t my_index = node_count++;
+			LPTS_DEBUG_PRINT("[LPTS-CTE] CteRef: scan_" + std::to_string(my_index) + " -> SELECT FROM '" +
+			                 body_lpts_name + "'");
+			// scan_N(ref_col1, ...) AS (SELECT body_col1, ... FROM body_lpts_name)
+			return make_uniq<GetNode>(my_index, cte_ref_node.cte_column_names, "", "", body_lpts_name, 0,
+			                          vector<string>(), body_lpts_cols);
+		}
+
 		// 1. Recurse into children first (post-order), remembering each child's CTE
 		//    name so the parent can reference it by name. We keep the name (not the
 		//    child's idx) because UNION flattening may insert intermediate CTEs into
@@ -1076,8 +1213,6 @@ private:
 		const size_t my_index = node_count++;
 
 		// 3. Create the CteNode matching this AstNode type.
-		const string &type = ast_node.NodeType();
-
 		if (type == "Get") {
 			const AstGetNode &get = static_cast<const AstGetNode &>(ast_node);
 			// Dialect-specific table reference:

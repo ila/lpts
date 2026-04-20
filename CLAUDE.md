@@ -8,7 +8,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 git pull                                      # pull latest commits
 git submodule update --init --recursive       # update submodules to pinned commits
-git -C duckdb checkout v1.5.0                 # ensure duckdb is on the required tag
 ```
 
 When you're stuck — either unable to fix a bug after 2-3 attempts, or tempted to work around the actual problem by redefining the objective — **stop and ask the user for directions**. Explain clearly what the specific problem is (e.g., "AstToCteList produces wrong column names for a 3-way join — should I fix the AstJoinNode output ordering or adjust the CTE binding map?"). The user knows this codebase deeply and can often point you to the right solution in one sentence. Do not silently change the goal, declare something impossible, or add bloated workarounds without consulting first. We work as a team.
@@ -46,7 +45,7 @@ D PRAGMA lpts('SELECT name FROM users WHERE age > 25');
 
 ```bash
 GEN=ninja make          # build (release)
-cmake format-fix        # auto-format all source files (run before committing)
+make format-fix         # auto-format all source files (run before committing)
 
 make shell              # launch DuckDB shell with lpts extension loaded
 make unittest           # run all SQL logic tests
@@ -271,7 +270,7 @@ Use `PRAGMA lpts(...)` to see the full CTE SQL output, and `PRAGMA print_ast(...
 
 ## Code style (clang-format / clang-tidy)
 
-Run `cmake format-fix` to auto-format. The project uses DuckDB's `.clang-format` (LLVM-based):
+Run `make format-fix` to auto-format. The project uses DuckDB's `.clang-format` (LLVM-based):
 
 - **Classes/Enums**: `CamelCase` (e.g., `AstGetNode`, `SqlDialect`)
 - **Functions**: `CamelCase` (e.g., `LogicalPlanToAst`, `AstToCteList`)

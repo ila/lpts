@@ -233,6 +233,39 @@ public:
 	}
 };
 
+/// Materialized CTE node: wraps a CTE body + outer query.
+/// children[0] = CTE body AST, children[1] = outer query AST.
+/// Used to correctly order Phase-2 flattening so CTE_REF nodes can look up the body CTE name.
+class AstMaterializedCteNode : public AstNode {
+public:
+	idx_t cte_table_index; ///< table_index from LogicalMaterializedCTE (key for CTE_REF lookup).
+
+	explicit AstMaterializedCteNode(idx_t cte_table_index_p) : cte_table_index(cte_table_index_p) {
+	}
+
+	string ToString(int indent = 0) const override;
+	string NodeType() const override {
+		return "MaterializedCte";
+	}
+};
+
+/// CTE reference node: a scan of a previously-defined materialized CTE body.
+/// Has no children. The body CTE name is resolved in Phase 2 via cte_table_index.
+class AstCteRefNode : public AstNode {
+public:
+	idx_t cte_table_index;           ///< Matches AstMaterializedCteNode::cte_table_index.
+	vector<string> cte_column_names; ///< Output column names for this CTE scan (e.g. "tN_supplier_no").
+
+	AstCteRefNode(idx_t cte_table_index_p, vector<string> cte_column_names_p)
+	    : cte_table_index(cte_table_index_p), cte_column_names(std::move(cte_column_names_p)) {
+	}
+
+	string ToString(int indent = 0) const override;
+	string NodeType() const override {
+		return "CteRef";
+	}
+};
+
 /// Pretty-print the full AST tree starting from the given root node.
 string PrintAst(const AstNode &root);
 

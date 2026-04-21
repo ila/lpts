@@ -703,15 +703,28 @@ private:
 			// GROUP BY columns
 			for (size_t i = 0; i < agg.groups.size(); ++i) {
 				const unique_ptr<Expression> &g = agg.groups[i];
-				if (g->type != ExpressionType::BOUND_COLUMN_REF) {
-					throw NotImplementedException("AstBuilder: only BOUND_COLUMN_REF supported in GROUP BY");
+				if (g->type == ExpressionType::BOUND_COLUMN_REF) {
+					BoundColumnRefExpression &bcr = g->Cast<BoundColumnRefExpression>();
+					auto it = column_map.find(MappableColumnBinding(bcr.binding));
+					if (it == column_map.end()) {
+						throw InternalException("LPTS: GROUP BY column ref (%llu,%llu) not in column_map",
+						                        (unsigned long long)bcr.binding.table_index,
+						                        (unsigned long long)bcr.binding.column_index);
+					}
+					const unique_ptr<ColStruct> &desc = it->second;
+					group_names.push_back(desc->ToUniqueColumnName());
+					auto new_col = make_uniq<ColStruct>(group_table_index, desc->column_name, desc->alias);
+					cte_column_names.push_back(new_col->ToUniqueColumnName());
+					column_map[MappableColumnBinding(ColumnBinding(group_table_index, i))] = std::move(new_col);
+				} else {
+					// Non-column GROUP BY expression (COALESCE, CASE, function, etc.)
+					string expr_str = ExpressionToAliasedString(g);
+					string alias = g->HasAlias() ? g->GetAlias() : ("grp_" + std::to_string(i));
+					group_names.push_back(expr_str);
+					auto new_col = make_uniq<ColStruct>(group_table_index, expr_str, std::move(alias));
+					cte_column_names.push_back(new_col->ToUniqueColumnName());
+					column_map[MappableColumnBinding(ColumnBinding(group_table_index, i))] = std::move(new_col);
 				}
-				BoundColumnRefExpression &bcr = g->Cast<BoundColumnRefExpression>();
-				unique_ptr<ColStruct> &desc = column_map.at(MappableColumnBinding(bcr.binding));
-				group_names.push_back(desc->ToUniqueColumnName());
-				auto new_col = make_uniq<ColStruct>(group_table_index, desc->column_name, desc->alias);
-				cte_column_names.push_back(new_col->ToUniqueColumnName());
-				column_map[MappableColumnBinding(ColumnBinding(group_table_index, i))] = std::move(new_col);
 			}
 
 			// Aggregate expressions

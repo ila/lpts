@@ -793,6 +793,29 @@ private:
 				column_map[MappableColumnBinding(ColumnBinding(agg_table_index, i))] = std::move(new_col);
 			}
 
+			// Remap source bindings → aggregate group output bindings.
+			// Parent ORDER BY / FILTER / MARK JOIN nodes may still reference the pre-aggregate
+			// bindings (e.g. from a replaced DISTINCT that used to pass through its child's
+			// bindings). Without this, ExpressionToAliasedString returns the pre-aggregate
+			// CTE alias (e.g. t8_col) which no longer exists downstream of the aggregate CTE.
+			// Must run AFTER group_names and agg_expressions are populated so the aggregate's
+			// own GROUP BY/SELECT still uses the child's column names (e.g. SUM(t0_val) when
+			// val is also a GROUP BY column).
+			for (size_t i = 0; i < agg.groups.size(); ++i) {
+				const unique_ptr<Expression> &g = agg.groups[i];
+				if (g->type != ExpressionType::BOUND_COLUMN_REF) {
+					continue;
+				}
+				BoundColumnRefExpression &bcr = g->Cast<BoundColumnRefExpression>();
+				ColumnBinding new_cb(group_table_index, i);
+				if (bcr.binding == new_cb) {
+					continue;
+				}
+				const auto &new_col = column_map.at(MappableColumnBinding(new_cb));
+				column_map[MappableColumnBinding(bcr.binding)] =
+				    make_uniq<ColStruct>(new_col->table_index, new_col->column_name, new_col->alias);
+			}
+
 			return make_uniq<AstAggregateNode>(std::move(group_names), std::move(agg_expressions),
 			                                   std::move(cte_column_names));
 		}

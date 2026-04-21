@@ -43,6 +43,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_any_join.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
@@ -883,6 +884,28 @@ private:
 			}
 			return make_uniq<AstJoinNode>(sql_join_type, std::move(conditions), std::move(cte_column_names),
 			                              std::move(mark_expr));
+		}
+
+		//----------------------------------------------------------------------
+		// LOGICAL_ANY_JOIN: join with an arbitrary expression condition (single
+		// expression, not a list of comparisons). Produced when the optimizer
+		// can't decompose the ON clause into conjunction of comparisons —
+		// e.g. `ON a.x * 2 > b.y`, or CROSS JOIN + WHERE combined into a join.
+		// Serialize as a normal JOIN with the condition as an opaque predicate.
+		case LogicalOperatorType::LOGICAL_ANY_JOIN: {
+			const LogicalAnyJoin &any_join = op->Cast<LogicalAnyJoin>();
+			vector<string> conditions;
+			if (any_join.condition) {
+				conditions.push_back("(" + ExpressionToAliasedString(any_join.condition) + ")");
+			} else {
+				conditions.push_back("(TRUE)");
+			}
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				unique_ptr<ColStruct> &col_struct = column_map.at(MappableColumnBinding(cb));
+				cte_column_names.push_back(col_struct->ToUniqueColumnName());
+			}
+			return make_uniq<AstJoinNode>(any_join.join_type, std::move(conditions), std::move(cte_column_names));
 		}
 
 		case LogicalOperatorType::LOGICAL_CROSS_PRODUCT: {

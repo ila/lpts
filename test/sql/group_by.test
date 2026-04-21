@@ -211,3 +211,21 @@ query I
 PRAGMA lpts_check('SELECT grp, sum(val) FROM with_nulls GROUP BY grp');
 ----
 true
+
+# --- COALESCE / CASE in GROUP BY (non-BOUND_COLUMN_REF group expressions) ---
+
+statement ok
+CREATE TABLE coalesce_grp (a INTEGER, b INTEGER, val INTEGER);
+
+statement ok
+INSERT INTO coalesce_grp VALUES (1, NULL, 10), (NULL, 1, 20), (1, NULL, 30), (2, 3, 5);
+
+query I
+PRAGMA lpts_check('SELECT COALESCE(a, b) AS key, SUM(val) FROM coalesce_grp GROUP BY COALESCE(a, b)');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT COALESCE(a, b) AS key, a, COUNT(*) FROM coalesce_grp GROUP BY COALESCE(a, b), a');
+----
+true

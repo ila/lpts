@@ -256,7 +256,18 @@ private:
 				const bool is_struct_pack = (func_name == "struct_pack" || func_name == "row") &&
 				                            func_expr.return_type.id() == LogicalTypeId::STRUCT &&
 				                            !StructType::IsUnnamed(func_expr.return_type);
-				expr_str << func_name << "(";
+				// Some function names collide with SQL keywords (POSITION, SUBSTRING,
+				// OVERLAY, TRIM). DuckDB's parser rejects them as plain identifiers and
+				// expects the keyword-separator syntax (`POSITION(x IN y)`), but it
+				// accepts them as quoted identifiers (`"position"(x, y)`) — let the
+				// function resolver see the function call directly and bypass the
+				// keyword-syntax path.
+				string emit_name = func_name;
+				if (func_name == "position" || func_name == "substring" || func_name == "overlay" ||
+				    func_name == "trim") {
+					emit_name = "\"" + func_name + "\"";
+				}
+				expr_str << emit_name << "(";
 				for (idx_t i = 0; i < child_count; i++) {
 					if (i > 0) {
 						expr_str << ", ";

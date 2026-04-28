@@ -326,6 +326,58 @@ string AstCteRefNode::ToString(int indent) const {
 }
 
 //------------------------------------------------------------------------------
+// AstDelimGetNode
+//------------------------------------------------------------------------------
+
+string AstDelimGetNode::ToString(int indent) const {
+	string result = Indent(indent) + "DelimGet (table_index=" + std::to_string(table_index) + ")";
+	if (!cte_column_names.empty()) {
+		result += "\n" + Indent(indent + 2) + "exposed: [";
+		for (size_t i = 0; i < cte_column_names.size(); i++) {
+			if (i > 0) {
+				result += ", ";
+			}
+			result += cte_column_names[i];
+		}
+		result += "]";
+	}
+	if (!source_col_names.empty()) {
+		result += "\n" + Indent(indent + 2) + "source: [";
+		for (size_t i = 0; i < source_col_names.size(); i++) {
+			if (i > 0) {
+				result += ", ";
+			}
+			result += source_col_names[i];
+		}
+		result += "]";
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
+// AstDelimJoinNode
+//------------------------------------------------------------------------------
+
+string AstDelimJoinNode::ToString(int indent) const {
+	string result = Indent(indent) + "DelimJoin (" + EnumUtil::ToString(join_type) + ")";
+	result += " delim_table_indices=[";
+	for (size_t i = 0; i < delim_table_indices.size(); i++) {
+		if (i > 0) {
+			result += ",";
+		}
+		result += std::to_string(delim_table_indices[i]);
+	}
+	result += "]";
+	for (const auto &cond : conditions) {
+		result += "\n" + Indent(indent + 2) + "on: " + cond;
+	}
+	for (auto &child : children) {
+		result += "\n" + child->ToString(indent + 2);
+	}
+	return result;
+}
+
+//------------------------------------------------------------------------------
 // PrintAst — free function
 //------------------------------------------------------------------------------
 

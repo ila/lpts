@@ -97,19 +97,22 @@ string GetNode::ToQuery() {
 	} else {
 		get_str << VecToSeparatedList(column_names);
 	}
-	get_str << " FROM ";
-	if (!catalog.empty()) {
-		// Fully-qualified: catalog.schema.table (DuckDB dialect)
-		get_str << catalog << "." << schema << "." << table_name;
-	} else {
-		// Unqualified: table function or simple table name
-		get_str << table_name;
-		// For table functions, add column aliases so renamed columns resolve correctly.
-		// Skip for DuckLake functions — the _tf alias mismatches when virtual columns
-		// (snapshot_id, rowid) are in the SELECT but not in the function's output schema.
-		if (table_name.find('(') != string::npos && !column_names.empty() &&
-		    table_name.find("ducklake_table_") == string::npos) {
-			get_str << " _tf(" << VecToSeparatedList(column_names) << ")";
+	// An empty table_name means no FROM clause (e.g. EMPTY_RESULT: SELECT NULL::T WHERE false).
+	if (!table_name.empty()) {
+		get_str << " FROM ";
+		if (!catalog.empty()) {
+			// Fully-qualified: catalog.schema.table (DuckDB dialect)
+			get_str << catalog << "." << schema << "." << table_name;
+		} else {
+			// Unqualified: table function or simple table name
+			get_str << table_name;
+			// For table functions, add column aliases so renamed columns resolve correctly.
+			// Skip for DuckLake functions — the _tf alias mismatches when virtual columns
+			// (snapshot_id, rowid) are in the SELECT but not in the function's output schema.
+			if (table_name.find('(') != string::npos && !column_names.empty() &&
+			    table_name.find("ducklake_table_") == string::npos) {
+				get_str << " _tf(" << VecToSeparatedList(column_names) << ")";
+			}
 		}
 	}
 	if (!table_filters.empty()) {
@@ -179,6 +182,17 @@ string JoinNode::ToQuery() {
 	} else {
 		join_str << "SELECT " << VecToSeparatedList(cte_column_list) << " FROM ";
 	}
+	// RIGHT_SEMI / RIGHT_ANTI: the preserved (output) side is the RIGHT CTE.
+	// Emit as "right SEMI/ANTI JOIN left" so the preserved side is on the left in SQL.
+	// cte_column_list already contains only the preserved side's columns (from GetColumnBindings).
+	if (join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI) {
+		join_str << right_cte_name << " ";
+		join_str << (join_type == JoinType::RIGHT_SEMI ? "SEMI" : "ANTI");
+		join_str << " JOIN " << left_cte_name;
+		join_str << " ON " << VecToSeparatedList(join_conditions, " AND ");
+		return join_str.str();
+	}
+
 	join_str << left_cte_name;
 	join_str << " ";
 	switch (join_type) {
@@ -262,6 +276,18 @@ string DistinctNode::ToQuery() {
 	std::ostringstream distinct_str;
 	distinct_str << "SELECT DISTINCT * FROM " << child_cte_name;
 	return distinct_str.str();
+}
+
+string DelimGetNode::ToQuery() {
+	std::ostringstream s;
+	s << "SELECT DISTINCT ";
+	if (source_cols.empty()) {
+		s << "*";
+	} else {
+		s << VecToSeparatedList(source_cols);
+	}
+	s << " FROM " << source_cte_name;
+	return s.str();
 }
 
 /// Serialize the entire CTE list into a SQL string.

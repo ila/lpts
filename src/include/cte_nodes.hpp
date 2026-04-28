@@ -309,6 +309,23 @@ public:
 	string ToQuery() override;
 };
 
+/// DELIM_GET node — SELECT DISTINCT of correlated columns from the outer query CTE.
+/// Generated as part of DELIM_JOIN decorrelation. Produces distinct correlation key values
+/// that are fed into the inner subquery, enabling a non-correlated join.
+class DelimGetNode : public CteNode {
+	string source_cte_name;     ///< The left-side (outer) CTE to SELECT DISTINCT from.
+	vector<string> source_cols; ///< Column names to project from source_cte (e.g. "t3_p_partkey").
+
+public:
+	~DelimGetNode() override = default;
+	DelimGetNode(const size_t index, vector<string> cte_column_names, string _source_cte_name,
+	             vector<string> _source_cols)
+	    : CteNode(index, "scan_" + std::to_string(index), std::move(cte_column_names)),
+	      source_cte_name(std::move(_source_cte_name)), source_cols(std::move(_source_cols)) {
+	}
+	string ToQuery() override;
+};
+
 /// The complete CTE list: an ordered list of CTE nodes + one final (root) node.
 /// Calling ToQuery() serializes the whole thing into a single SQL string.
 class CteList {

@@ -65,7 +65,6 @@ static unique_ptr<LogicalOperator> PlanQuery(ClientContext &context, const strin
 	config.options.disabled_optimizers.insert(OptimizerType::STATISTICS_PROPAGATION);
 	config.options.disabled_optimizers.insert(OptimizerType::REORDER_FILTER);
 	config.options.disabled_optimizers.insert(OptimizerType::TOP_N);
-	config.options.disabled_optimizers.insert(OptimizerType::FILTER_PUSHDOWN);
 	config.options.disabled_optimizers.insert(OptimizerType::JOIN_FILTER_PUSHDOWN);
 	config.options.disabled_optimizers.insert(OptimizerType::CTE_INLINING);
 	config.options.disabled_optimizers.insert(OptimizerType::MATERIALIZED_CTE);

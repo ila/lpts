@@ -53,6 +53,7 @@
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_delim_get.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 namespace duckdb {
@@ -130,6 +131,10 @@ private:
 	/// Global map: ColumnBinding → ColStruct.
 	/// Populated bottom-up; each operator registers its output columns here.
 	std::map<MappableColumnBinding, unique_ptr<ColStruct>> column_map;
+
+	/// Maps DELIM_GET table_index → source column names (from the outer/left CTE).
+	/// Populated by PreregisterDelimGetColumns before the right subtree is traversed.
+	unordered_map<idx_t, vector<string>> delim_get_source_col_names;
 
 	//--------------------------------------------------------------------------
 	// CollectLambdaParamNames
@@ -423,6 +428,73 @@ private:
 	}
 
 	//--------------------------------------------------------------------------
+	// CollectDelimGetTableIndices
+	//
+	// Walk the inner subtree of a DELIM_JOIN, collecting table_index values of
+	// all LOGICAL_DELIM_GET nodes. Stops at nested LOGICAL_DELIM_JOIN nodes
+	// (they own their own DELIM_GETs and handle them separately).
+	//--------------------------------------------------------------------------
+	static void CollectDelimGetTableIndices(const LogicalOperator *subtree, vector<idx_t> &out) {
+		if (!subtree) {
+			return;
+		}
+		if (subtree->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
+			out.push_back(subtree->Cast<LogicalDelimGet>().table_index);
+			return;
+		}
+		if (subtree->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+			return; // nested delim join — not our responsibility
+		}
+		for (const auto &child : subtree->children) {
+			CollectDelimGetTableIndices(child.get(), out);
+		}
+	}
+
+	//--------------------------------------------------------------------------
+	// PreregisterDelimGetColumns
+	//
+	// Before recursing into the right subtree of a DELIM_JOIN, walk it looking
+	// for DELIM_GET nodes. For each found, register its output columns in
+	// column_map (using left-side column names from duplicate_eliminated_columns)
+	// and record source column names for Phase 2 CTE generation.
+	//--------------------------------------------------------------------------
+	void PreregisterDelimGetColumns(const LogicalOperator *subtree, const vector<unique_ptr<Expression>> &dup_cols) {
+		if (!subtree) {
+			return;
+		}
+		if (subtree->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
+			const LogicalDelimGet &dg = subtree->Cast<LogicalDelimGet>();
+			const idx_t dg_ti = dg.table_index;
+			vector<string> source_names;
+
+			for (size_t i = 0; i < dg.chunk_types.size(); i++) {
+				string col_name = "c" + std::to_string(i);
+				string source_col_name = col_name;
+
+				if (i < dup_cols.size() && dup_cols[i]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+					const auto &bcr = dup_cols[i]->Cast<BoundColumnRefExpression>();
+					auto it = column_map.find(MappableColumnBinding(bcr.binding));
+					if (it != column_map.end()) {
+						col_name = it->second->column_name;
+						source_col_name = it->second->ToUniqueColumnName();
+					}
+				}
+
+				source_names.push_back(source_col_name);
+				column_map[MappableColumnBinding(ColumnBinding(dg_ti, i))] = make_uniq<ColStruct>(dg_ti, col_name, "");
+			}
+
+			delim_get_source_col_names[dg_ti] = std::move(source_names);
+			return;
+		}
+		if (subtree->type != LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+			for (const auto &child : subtree->children) {
+				PreregisterDelimGetColumns(child.get(), dup_cols);
+			}
+		}
+	}
+
+	//--------------------------------------------------------------------------
 	// BuildNode
 	//
 	// Creates an AstNode for the given operator. Children must already be
@@ -592,9 +664,17 @@ private:
 			}
 
 			// Pushdown table filters (rare, but present in some plans).
+			// FILTER_PUSHDOWN wraps pushed-down conditions in OptionalFilter, whose
+			// ToString() prepends "optional: ". Strip that prefix so the condition
+			// is valid SQL when embedded in a WHERE clause.
 			if (!get.table_filters.filters.empty()) {
 				for (auto &entry : get.table_filters.filters) {
-					table_filters.push_back(entry.second->ToString(get.names[entry.first]));
+					string filter_str = entry.second->ToString(get.names[entry.first]);
+					static const string kOptionalPrefix = "optional: ";
+					if (filter_str.substr(0, kOptionalPrefix.size()) == kOptionalPrefix) {
+						filter_str = filter_str.substr(kOptionalPrefix.size());
+					}
+					table_filters.push_back(std::move(filter_str));
 				}
 			}
 
@@ -1016,9 +1096,10 @@ private:
 				column_names.push_back("NULL::" + empty.return_types[i].ToString());
 				column_map[MappableColumnBinding(empty.bindings[i])] = std::move(col_struct);
 			}
-			// Emit a dummy scan with WHERE false to produce zero rows
+			// Emit WHERE false with no FROM clause to produce zero rows.
+			// Passing an empty table_name signals GetNode::ToQuery() to omit the FROM.
 			vector<string> filters = {"false"};
-			return make_uniq<AstGetNode>("", "", "__empty__", 0, std::move(column_names), std::move(cte_column_names),
+			return make_uniq<AstGetNode>("", "", "", 0, std::move(column_names), std::move(cte_column_names),
 			                             std::move(filters));
 		}
 
@@ -1106,6 +1187,157 @@ private:
 			return make_uniq<AstMaterializedCteNode>(mat_cte.table_index);
 		}
 
+		//----------------------------------------------------------------------
+		// LOGICAL_DELIM_GET: a duplicate-eliminated scan driven by a parent DELIM_JOIN.
+		// Columns are pre-registered in column_map by PreregisterDelimGetColumns before
+		// the right subtree is traversed. We just collect them here and build the node.
+		case LogicalOperatorType::LOGICAL_DELIM_GET: {
+			const LogicalDelimGet &dg = op->Cast<LogicalDelimGet>();
+			const idx_t table_index = dg.table_index;
+
+			LPTS_DEBUG_PRINT("[LPTS-AST] DELIM_GET: table_index=" + std::to_string(table_index) +
+			                 " cols=" + std::to_string(dg.chunk_types.size()));
+
+			vector<string> cte_column_names;
+			for (size_t i = 0; i < dg.chunk_types.size(); i++) {
+				auto it = column_map.find(MappableColumnBinding(ColumnBinding(table_index, i)));
+				if (it != column_map.end()) {
+					cte_column_names.push_back(it->second->ToUniqueColumnName());
+				} else {
+					// Fallback: parent DELIM_JOIN should have pre-registered these.
+					auto col_struct = make_uniq<ColStruct>(table_index, "c" + std::to_string(i), "");
+					cte_column_names.push_back(col_struct->ToUniqueColumnName());
+					column_map[MappableColumnBinding(ColumnBinding(table_index, i))] = std::move(col_struct);
+				}
+			}
+
+			vector<string> source_col_names;
+			auto src_it = delim_get_source_col_names.find(table_index);
+			if (src_it != delim_get_source_col_names.end()) {
+				source_col_names = src_it->second;
+			} else {
+				source_col_names = cte_column_names;
+			}
+
+			return make_uniq<AstDelimGetNode>(table_index, std::move(cte_column_names), std::move(source_col_names));
+		}
+
+		//----------------------------------------------------------------------
+		// LOGICAL_DELIM_JOIN: a duplicate-eliminating join used to decorrelate subqueries.
+		// children[0] = outer (left), children[1] = inner (right, contains DELIM_GET).
+		// The DELIM_GET in the right subtree has already been pre-registered in
+		// PreregisterDelimGetColumns before right child traversal (in RecursiveTraversal).
+		case LogicalOperatorType::LOGICAL_DELIM_JOIN: {
+			const LogicalComparisonJoin &dj = op->Cast<LogicalComparisonJoin>();
+			const idx_t inner_child_idx = dj.delim_flipped ? 0 : 1;
+
+			// Collect ALL DELIM_GET table_indices from the inner subtree.
+			// There can be more than one when the Deliminator keeps multiple inner joins.
+			vector<idx_t> delim_tis;
+			CollectDelimGetTableIndices(op->children[inner_child_idx].get(), delim_tis);
+
+			LPTS_DEBUG_PRINT("[LPTS-AST] DELIM_JOIN: join_type=" + EnumUtil::ToString(dj.join_type) +
+			                 " conditions=" + std::to_string(dj.conditions.size()) +
+			                 " dup_elim_cols=" + std::to_string(dj.duplicate_eliminated_columns.size()) +
+			                 " delim_flipped=" + std::to_string(dj.delim_flipped) + " delim_get_count=" +
+			                 std::to_string(delim_tis.size()) + " mark_index=" + std::to_string(dj.mark_index));
+
+			// For MARK-type DELIM_JOIN (correlated EXISTS), register the mark boolean column
+			// in column_map before building conditions, so any condition expression that
+			// references mark_index (or parent FILTERs checking the mark) can resolve it.
+			// Use "true" as the mark expression — the right CTE already contains only
+			// matching rows (via SELECT DISTINCT from the outer CTE), so any left row
+			// that appears in the RIGHT CTE is a match, and IS NOT NULL holds.
+			if (dj.join_type == JoinType::MARK) {
+				ColumnBinding mark_cb(dj.mark_index, 0);
+				string mark_expr = "true";
+				if (!dj.conditions.empty()) {
+					// Try to build the RHS expression for the IS NOT NULL check.
+					// Print the binding before attempting the lookup so we can diagnose failures.
+					if (dj.conditions[0].right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+						auto &bcr = dj.conditions[0].right->Cast<BoundColumnRefExpression>();
+						LPTS_DEBUG_PRINT("[LPTS-AST] DELIM_JOIN MARK: cond[0].right binding=(" +
+						                 std::to_string(bcr.binding.table_index) + "," +
+						                 std::to_string(bcr.binding.column_index) + ")");
+						auto it = column_map.find(MappableColumnBinding(bcr.binding));
+						if (it != column_map.end()) {
+							mark_expr = "(" + it->second->ToUniqueColumnName() + " IS NOT NULL)";
+						} else {
+							LPTS_DEBUG_PRINT("[LPTS-AST] DELIM_JOIN MARK: cond[0].right binding NOT in column_map");
+						}
+					}
+					if (dj.conditions[0].left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+						auto &bcr = dj.conditions[0].left->Cast<BoundColumnRefExpression>();
+						LPTS_DEBUG_PRINT("[LPTS-AST] DELIM_JOIN MARK: cond[0].left binding=(" +
+						                 std::to_string(bcr.binding.table_index) + "," +
+						                 std::to_string(bcr.binding.column_index) + ")");
+						auto it2 = column_map.find(MappableColumnBinding(bcr.binding));
+						if (it2 == column_map.end()) {
+							LPTS_DEBUG_PRINT("[LPTS-AST] DELIM_JOIN MARK: cond[0].left binding NOT in column_map");
+						}
+					}
+				}
+				LPTS_DEBUG_PRINT("[LPTS-AST] DELIM_JOIN MARK: registering mark column mark_index=" +
+				                 std::to_string(dj.mark_index) + " expr='" + mark_expr + "'");
+				column_map[MappableColumnBinding(mark_cb)] = make_uniq<ColStruct>(dj.mark_index, mark_expr, "_mark");
+			}
+
+			vector<string> conditions;
+			for (const auto &cond : dj.conditions) {
+				if (cond.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+					auto &bcr = cond.left->Cast<BoundColumnRefExpression>();
+					LPTS_DEBUG_PRINT(
+					    "[LPTS-AST] DELIM_JOIN cond.left binding=(" + std::to_string(bcr.binding.table_index) + "," +
+					    std::to_string(bcr.binding.column_index) +
+					    ") in_map=" + std::to_string(column_map.count(MappableColumnBinding(bcr.binding))));
+				}
+				if (cond.right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+					auto &bcr = cond.right->Cast<BoundColumnRefExpression>();
+					LPTS_DEBUG_PRINT(
+					    "[LPTS-AST] DELIM_JOIN cond.right binding=(" + std::to_string(bcr.binding.table_index) + "," +
+					    std::to_string(bcr.binding.column_index) +
+					    ") in_map=" + std::to_string(column_map.count(MappableColumnBinding(bcr.binding))));
+				}
+				string lhs = ExpressionToAliasedString(cond.left);
+				string rhs = ExpressionToAliasedString(cond.right);
+				string cmp = ExpressionTypeToOperator(cond.comparison);
+				conditions.push_back("(" + lhs + " " + cmp + " " + rhs + ")");
+			}
+
+			// Normalize join type for SQL output. RecursiveTraversal already ensures outer
+			// is children[0] (left) and inner is children[1] (right) regardless of
+			// delim_flipped, so RIGHT_SEMI (outer=right) becomes SEMI (outer=left).
+			string mark_col_expr;
+			JoinType sql_join_type = dj.join_type;
+			if (sql_join_type == JoinType::MARK) {
+				sql_join_type = JoinType::LEFT;
+				ColumnBinding mark_cb(dj.mark_index, 0);
+				auto it = column_map.find(MappableColumnBinding(mark_cb));
+				if (it != column_map.end()) {
+					mark_col_expr = it->second->column_name; // the IS NOT NULL expression
+				}
+			} else if (sql_join_type == JoinType::SINGLE) {
+				sql_join_type = JoinType::LEFT;
+			} else if (sql_join_type == JoinType::RIGHT_SEMI) {
+				// delim_flipped=1: outer was physical-right, now normalized to SQL-left.
+				sql_join_type = JoinType::SEMI;
+			} else if (sql_join_type == JoinType::RIGHT_ANTI) {
+				// delim_flipped=1: outer was physical-right, now normalized to SQL-left.
+				sql_join_type = JoinType::ANTI;
+			}
+
+			vector<string> cte_column_names;
+			for (const ColumnBinding &cb : op->GetColumnBindings()) {
+				auto it = column_map.find(MappableColumnBinding(cb));
+				if (it != column_map.end()) {
+					cte_column_names.push_back(it->second->ToUniqueColumnName());
+				}
+			}
+
+			return make_uniq<AstDelimJoinNode>(sql_join_type, std::move(conditions), std::move(cte_column_names),
+			                                   std::move(delim_tis), std::move(mark_col_expr));
+		}
+
 		default:
 			throw NotImplementedException("AstBuilder: operator '%s' is not yet implemented",
 			                              LogicalOperatorToString(op->type));
@@ -1135,6 +1367,19 @@ private:
 				child_nodes.push_back(RecursiveTraversal(op->children[ci]));
 			}
 			column_map = std::move(saved_map);
+		} else if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+			// DELIM_JOIN: process outer child first (builds column_map for outer cols),
+			// then pre-register DELIM_GET columns, then process inner child.
+			// Always store: children[0] = outer, children[1] = inner — regardless of
+			// delim_flipped. Phase 2 FlattenNode("DelimJoin") relies on this order.
+			const LogicalComparisonJoin &dj = op->Cast<LogicalComparisonJoin>();
+			const idx_t outer_idx = dj.delim_flipped ? 1 : 0;
+			const idx_t inner_idx = dj.delim_flipped ? 0 : 1;
+
+			child_nodes.resize(2);
+			child_nodes[0] = RecursiveTraversal(op->children[outer_idx]);
+			PreregisterDelimGetColumns(op->children[inner_idx].get(), dj.duplicate_eliminated_columns);
+			child_nodes[1] = RecursiveTraversal(op->children[inner_idx]);
 		} else {
 			for (auto &child : op->children) {
 				child_nodes.push_back(RecursiveTraversal(child));
@@ -1208,6 +1453,10 @@ private:
 	/// consumed when flattening AstCteRefNode.
 	unordered_map<idx_t, pair<string, vector<string>>> cte_index_to_body_info;
 
+	/// Maps AstDelimGetNode::table_index → name of the outer left CTE to SELECT DISTINCT from.
+	/// Populated when flattening AstDelimJoinNode (before the right subtree); consumed by AstDelimGetNode.
+	unordered_map<idx_t, string> delim_get_source_cte;
+
 	/// Compute the CTE name for a given node type and index.
 	static string CteName(const AstNode &node, size_t index) {
 		const string &type = node.NodeType();
@@ -1265,6 +1514,56 @@ private:
 			// scan_N(ref_col1, ...) AS (SELECT body_col1, ... FROM body_lpts_name)
 			return make_uniq<GetNode>(my_index, cte_ref_node.cte_column_names, "", "", body_lpts_name, 0,
 			                          vector<string>(), body_lpts_cols);
+		}
+
+		// DelimJoin: special ordering — flatten outer (left) child first, then register the
+		// DELIM_GET source CTE name, then flatten inner (right) child, then create JOIN CTE.
+		// This mirrors the MaterializedCte pattern of controlling child ordering.
+		if (type == "DelimJoin") {
+			const AstDelimJoinNode &dj = static_cast<const AstDelimJoinNode &>(ast_node);
+			D_ASSERT(ast_node.children.size() == 2);
+
+			// 1. Flatten outer (left) child.
+			unique_ptr<CteNode> left_cte = FlattenNode(*ast_node.children[0]);
+			string left_cte_name = left_cte->cte_name;
+			LPTS_DEBUG_PRINT("[LPTS-CTE] DelimJoin: left_cte='" + left_cte_name +
+			                 "' n_delim_tis=" + std::to_string(dj.delim_table_indices.size()));
+			cte_nodes.push_back(std::move(left_cte));
+
+			// 2. Register the outer CTE as the source for ALL DELIM_GETs in the inner subtree.
+			for (const idx_t dti : dj.delim_table_indices) {
+				LPTS_DEBUG_PRINT("[LPTS-CTE] DelimJoin: registering delim_ti=" + std::to_string(dti) + " -> '" +
+				                 left_cte_name + "'");
+				delim_get_source_cte[dti] = left_cte_name;
+			}
+
+			// 3. Flatten inner (right) child. AstDelimGetNode will pick up delim_get_source_cte.
+			unique_ptr<CteNode> right_cte = FlattenNode(*ast_node.children[1]);
+			string right_cte_name = right_cte->cte_name;
+			cte_nodes.push_back(std::move(right_cte));
+
+			// 4. Create the DELIM_JOIN as a regular JOIN CTE.
+			const size_t my_index = node_count++;
+			LPTS_DEBUG_PRINT("[LPTS-CTE] DelimJoin: join_" + std::to_string(my_index) + " LEFT='" + left_cte_name +
+			                 "' RIGHT='" + right_cte_name + "' mark_expr='" + dj.mark_expression + "'");
+			return make_uniq<JoinNode>(my_index, dj.cte_column_names, left_cte_name, right_cte_name, dj.join_type,
+			                           dj.conditions, dj.mark_expression);
+		}
+
+		// DelimGet: leaf node — creates a SELECT DISTINCT CTE from the outer left CTE.
+		// The outer left CTE name was registered by the parent DelimJoin handler above.
+		if (type == "DelimGet") {
+			const AstDelimGetNode &dg = static_cast<const AstDelimGetNode &>(ast_node);
+			auto it = delim_get_source_cte.find(dg.table_index);
+			if (it == delim_get_source_cte.end()) {
+				throw InternalException("LPTS: DelimGet table_index=%llu not registered by parent DelimJoin",
+				                        (unsigned long long)dg.table_index);
+			}
+			const string &source_cte_name = it->second;
+			const size_t my_index = node_count++;
+			LPTS_DEBUG_PRINT("[LPTS-CTE] DelimGet: scan_" + std::to_string(my_index) + " SELECT DISTINCT FROM '" +
+			                 source_cte_name + "'");
+			return make_uniq<DelimGetNode>(my_index, dg.cte_column_names, source_cte_name, dg.source_col_names);
 		}
 
 		// 1. Recurse into children first (post-order), remembering each child's CTE

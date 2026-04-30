@@ -51,6 +51,7 @@
 #include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
+#include "duckdb/planner/operator/logical_expression_get.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -1068,6 +1069,44 @@ private:
 			LPTS_DEBUG_PRINT("[LPTS-AST] CHUNK_GET: emitting VALUES: " + values_str.str());
 
 			// GetNode::ToQuery detects '(' in table_name and appends _tf(col_names) alias.
+			return make_uniq<AstGetNode>("", "", values_str.str(), table_index, std::move(column_names),
+			                             std::move(cte_column_names), vector<string>());
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_EXPRESSION_GET: {
+			// EXPRESSION_GET backs VALUES clauses. Emit it as a VALUES table function
+			// so constant relation joins can round-trip through SQL.
+			const LogicalExpressionGet &expr_get = op->Cast<LogicalExpressionGet>();
+			const idx_t table_index = expr_get.table_index;
+
+			vector<string> column_names;
+			vector<string> cte_column_names;
+			for (size_t i = 0; i < expr_get.expr_types.size(); ++i) {
+				string col_name = "c" + std::to_string(i);
+				auto col_struct = make_uniq<ColStruct>(table_index, col_name, "");
+				cte_column_names.push_back(col_struct->ToUniqueColumnName());
+				column_names.push_back(col_name);
+				column_map[MappableColumnBinding(ColumnBinding(table_index, i))] = std::move(col_struct);
+			}
+
+			std::ostringstream values_str;
+			values_str << "(VALUES ";
+			for (idx_t row_idx = 0; row_idx < expr_get.expressions.size(); row_idx++) {
+				if (row_idx > 0) {
+					values_str << ", ";
+				}
+				values_str << "(";
+				for (idx_t col_idx = 0; col_idx < expr_get.expressions[row_idx].size(); col_idx++) {
+					if (col_idx > 0) {
+						values_str << ", ";
+					}
+					values_str << ExpressionToAliasedString(expr_get.expressions[row_idx][col_idx]);
+				}
+				values_str << ")";
+			}
+			values_str << ")";
+
 			return make_uniq<AstGetNode>("", "", values_str.str(), table_index, std::move(column_names),
 			                             std::move(cte_column_names), vector<string>());
 		}

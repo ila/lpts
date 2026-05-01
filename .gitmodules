@@ -9,3 +9,9 @@
 [submodule "third_party/ducklake"]
 	path = third_party/ducklake
 	url = https://github.com/duckdb/ducklake.git
+[submodule ".claude/skills/shared"]
+	path = .claude/skills/shared
+	url = https://github.com/ila/duckdb-claude-skills.git
+[submodule "third_party/lpts"]
+	path = third_party/lpts
+	url = git@github.com:ila/lpts.git

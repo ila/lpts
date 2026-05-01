@@ -107,7 +107,7 @@ string GetNode::ToQuery() {
 		// For table functions, add column aliases so renamed columns resolve correctly.
 		// Skip for DuckLake functions — the _tf alias mismatches when virtual columns
 		// (snapshot_id, rowid) are in the SELECT but not in the function's output schema.
-		if (table_name.find('(') != string::npos && !column_names.empty() &&
+		if (table_name.find('(') != string::npos && table_name != "(SELECT 1)" && !column_names.empty() &&
 		    table_name.find("ducklake_table_") == string::npos) {
 			get_str << " _tf(" << VecToSeparatedList(column_names) << ")";
 		}

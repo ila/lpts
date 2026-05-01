@@ -1017,9 +1017,10 @@ private:
 				column_names.push_back("NULL::" + empty.return_types[i].ToString());
 				column_map[MappableColumnBinding(empty.bindings[i])] = std::move(col_struct);
 			}
-			// Emit a dummy scan with WHERE false to produce zero rows
+			// Emit a real zero-row subquery. Using a fake table name here leaks
+			// through when the empty result is nested inside a larger plan.
 			vector<string> filters = {"false"};
-			return make_uniq<AstGetNode>("", "", "__empty__", 0, std::move(column_names), std::move(cte_column_names),
+			return make_uniq<AstGetNode>("", "", "(SELECT 1)", 0, std::move(column_names), std::move(cte_column_names),
 			                             std::move(filters));
 		}
 

@@ -49,6 +49,7 @@
 #include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_distinct.hpp"
+#include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_expression_get.hpp"
@@ -647,17 +648,10 @@ private:
 				column_map[MappableColumnBinding(cb)] = std::move(col_struct);
 			}
 
-			// COUNT(*) / ROWID-only scans: emit a dummy column so the CTE body
-			// is valid SQL (SELECT 1 FROM ...). This covers both empty scans and
-			// virtual-column-only scans (e.g. DuckLake ROWID for COUNT(*)).
-			bool has_real_column = false;
-			for (auto &cn : column_names) {
-				if (cn != "rowid") {
-					has_real_column = true;
-					break;
-				}
-			}
-			if (!has_real_column) {
+			// COUNT(*) scans can have no projected columns. Emit a dummy column
+			// only in that case. Virtual-column-only scans (e.g. rowid) must keep
+			// the virtual column because parents may reference its CTE alias.
+			if (column_names.empty()) {
 				column_names.clear();
 				cte_column_names.clear();
 				column_names.push_back("1");
@@ -1083,6 +1077,21 @@ private:
 			const LogicalInsert &insert_op = op->Cast<LogicalInsert>();
 			return make_uniq<AstInsertNode>(insert_op.table.name, insert_op.on_conflict_info.action_type);
 		}
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_DUMMY_SCAN: {
+			// DUMMY_SCAN is DuckDB's single-row input for scalar constant
+			// expressions. Serialize it as a one-row subquery with a dummy column;
+			// parent projections will replace the dummy with their constants.
+			const LogicalDummyScan &dummy = op->Cast<LogicalDummyScan>();
+			const idx_t table_index = dummy.table_index;
+			vector<string> column_names = {"1"};
+			vector<string> cte_column_names = {"t" + std::to_string(table_index) + "_dummy"};
+			column_map[MappableColumnBinding(ColumnBinding(table_index, 0))] =
+			    make_uniq<ColStruct>(table_index, "1", "");
+			return make_uniq<AstGetNode>("", "", "(SELECT 1)", table_index, std::move(column_names),
+			                             std::move(cte_column_names), vector<string>());
+		}
+
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_EMPTY_RESULT: {
 			// The optimizer replaced a subtree with an empty result (e.g. LIMIT 0).

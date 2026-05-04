@@ -38,6 +38,7 @@
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_unnest_expression.hpp"
+#include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/function/lambda_functions.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -45,6 +46,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_window.hpp"
 #include "duckdb/planner/operator/logical_any_join.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"
@@ -177,6 +179,267 @@ private:
 		}
 		ExpressionIterator::EnumerateChildren(const_cast<Expression &>(expr),
 		                                      [&](Expression &child) { CollectLambdaParamNames(child, names); });
+	}
+
+	string OrderByToAliasedString(const BoundOrderByNode &order) const {
+		std::ostringstream result;
+		result << ExpressionToAliasedString(order.expression);
+		switch (order.type) {
+		case OrderType::DESCENDING:
+			result << " DESC";
+			break;
+		case OrderType::ASCENDING:
+			result << " ASC";
+			break;
+		case OrderType::ORDER_DEFAULT:
+			break;
+		default:
+			throw NotImplementedException("Not implemented ORDER BY direction for window expression");
+		}
+		switch (order.null_order) {
+		case OrderByNullType::NULLS_FIRST:
+			result << " NULLS FIRST";
+			break;
+		case OrderByNullType::NULLS_LAST:
+			result << " NULLS LAST";
+			break;
+		case OrderByNullType::ORDER_DEFAULT:
+			break;
+		default:
+			throw NotImplementedException("Not implemented ORDER BY null ordering for window expression");
+		}
+		return result.str();
+	}
+
+	static string WindowFunctionName(const BoundWindowExpression &window) {
+		if (window.aggregate) {
+			string agg_name = window.aggregate->name;
+			if (agg_name == "sum_no_overflow") {
+				return "sum";
+			}
+			if (agg_name == "count_star") {
+				return "count";
+			}
+			return agg_name;
+		}
+		switch (window.GetExpressionType()) {
+		case ExpressionType::WINDOW_ROW_NUMBER:
+			return "row_number";
+		case ExpressionType::WINDOW_RANK:
+			return "rank";
+		case ExpressionType::WINDOW_RANK_DENSE:
+			return "dense_rank";
+		case ExpressionType::WINDOW_PERCENT_RANK:
+			return "percent_rank";
+		case ExpressionType::WINDOW_CUME_DIST:
+			return "cume_dist";
+		case ExpressionType::WINDOW_NTILE:
+			return "ntile";
+		case ExpressionType::WINDOW_FIRST_VALUE:
+			return "first_value";
+		case ExpressionType::WINDOW_LAST_VALUE:
+			return "last_value";
+		case ExpressionType::WINDOW_NTH_VALUE:
+			return "nth_value";
+		case ExpressionType::WINDOW_LEAD:
+			return "lead";
+		case ExpressionType::WINDOW_LAG:
+			return "lag";
+		case ExpressionType::WINDOW_FILL:
+			return "fill";
+		default:
+			throw NotImplementedException("Not implemented window function: %s",
+			                              ExpressionTypeToString(window.GetExpressionType()));
+		}
+	}
+
+	static string WindowFrameUnits(WindowBoundary boundary) {
+		switch (boundary) {
+		case WindowBoundary::CURRENT_ROW_ROWS:
+		case WindowBoundary::EXPR_PRECEDING_ROWS:
+		case WindowBoundary::EXPR_FOLLOWING_ROWS:
+			return "ROWS";
+		case WindowBoundary::CURRENT_ROW_RANGE:
+		case WindowBoundary::EXPR_PRECEDING_RANGE:
+		case WindowBoundary::EXPR_FOLLOWING_RANGE:
+			return "RANGE";
+		case WindowBoundary::CURRENT_ROW_GROUPS:
+		case WindowBoundary::EXPR_PRECEDING_GROUPS:
+		case WindowBoundary::EXPR_FOLLOWING_GROUPS:
+			return "GROUPS";
+		default:
+			return "ROWS";
+		}
+	}
+
+	string WindowFrameStartToAliasedString(const BoundWindowExpression &window, string &units) const {
+		switch (window.start) {
+		case WindowBoundary::CURRENT_ROW_RANGE:
+		case WindowBoundary::CURRENT_ROW_ROWS:
+		case WindowBoundary::CURRENT_ROW_GROUPS:
+			units = WindowFrameUnits(window.start);
+			return "CURRENT ROW";
+		case WindowBoundary::UNBOUNDED_PRECEDING:
+			if (window.end != WindowBoundary::CURRENT_ROW_RANGE) {
+				return "UNBOUNDED PRECEDING";
+			}
+			return "";
+		case WindowBoundary::EXPR_PRECEDING_ROWS:
+		case WindowBoundary::EXPR_PRECEDING_RANGE:
+		case WindowBoundary::EXPR_PRECEDING_GROUPS:
+			units = WindowFrameUnits(window.start);
+			return ExpressionToAliasedString(window.start_expr) + " PRECEDING";
+		case WindowBoundary::EXPR_FOLLOWING_ROWS:
+		case WindowBoundary::EXPR_FOLLOWING_RANGE:
+		case WindowBoundary::EXPR_FOLLOWING_GROUPS:
+			units = WindowFrameUnits(window.start);
+			return ExpressionToAliasedString(window.start_expr) + " FOLLOWING";
+		case WindowBoundary::INVALID:
+			return "";
+		default:
+			throw NotImplementedException("Not implemented window frame start");
+		}
+	}
+
+	string WindowFrameEndToAliasedString(const BoundWindowExpression &window, string &units) const {
+		switch (window.end) {
+		case WindowBoundary::CURRENT_ROW_RANGE:
+			if (window.start != WindowBoundary::UNBOUNDED_PRECEDING && window.start != WindowBoundary::INVALID) {
+				units = "RANGE";
+				return "CURRENT ROW";
+			}
+			return "";
+		case WindowBoundary::CURRENT_ROW_ROWS:
+		case WindowBoundary::CURRENT_ROW_GROUPS:
+			units = WindowFrameUnits(window.end);
+			return "CURRENT ROW";
+		case WindowBoundary::UNBOUNDED_PRECEDING:
+			return "UNBOUNDED PRECEDING";
+		case WindowBoundary::UNBOUNDED_FOLLOWING:
+			return "UNBOUNDED FOLLOWING";
+		case WindowBoundary::EXPR_PRECEDING_ROWS:
+		case WindowBoundary::EXPR_PRECEDING_RANGE:
+		case WindowBoundary::EXPR_PRECEDING_GROUPS:
+			units = WindowFrameUnits(window.end);
+			return ExpressionToAliasedString(window.end_expr) + " PRECEDING";
+		case WindowBoundary::EXPR_FOLLOWING_ROWS:
+		case WindowBoundary::EXPR_FOLLOWING_RANGE:
+		case WindowBoundary::EXPR_FOLLOWING_GROUPS:
+			units = WindowFrameUnits(window.end);
+			return ExpressionToAliasedString(window.end_expr) + " FOLLOWING";
+		case WindowBoundary::INVALID:
+			return "";
+		default:
+			throw NotImplementedException("Not implemented window frame end");
+		}
+	}
+
+	string WindowExpressionToAliasedString(const BoundWindowExpression &window) const {
+		std::ostringstream result;
+		result << WindowFunctionName(window) << "(";
+		if (window.aggregate && window.aggregate->name == "count_star" && window.children.empty()) {
+			result << "*";
+		}
+		for (idx_t i = 0; i < window.children.size(); i++) {
+			if (i > 0) {
+				result << ", ";
+			}
+			if (window.distinct && i == 0) {
+				result << "DISTINCT ";
+			}
+			result << ExpressionToAliasedString(window.children[i]);
+		}
+		if (window.offset_expr) {
+			if (!window.children.empty()) {
+				result << ", ";
+			}
+			result << ExpressionToAliasedString(window.offset_expr);
+		}
+		if (window.default_expr) {
+			if (!window.children.empty() || window.offset_expr) {
+				result << ", ";
+			}
+			result << ExpressionToAliasedString(window.default_expr);
+		}
+		if (!window.arg_orders.empty()) {
+			result << " ORDER BY ";
+			for (idx_t i = 0; i < window.arg_orders.size(); i++) {
+				if (i > 0) {
+					result << ", ";
+				}
+				result << OrderByToAliasedString(window.arg_orders[i]);
+			}
+		}
+		if (window.ignore_nulls) {
+			result << " IGNORE NULLS";
+		}
+		if (window.filter_expr) {
+			result << ") FILTER (WHERE " << ExpressionToAliasedString(window.filter_expr);
+		}
+
+		result << ") OVER (";
+		string separator;
+		if (!window.partitions.empty()) {
+			result << "PARTITION BY ";
+			for (idx_t i = 0; i < window.partitions.size(); i++) {
+				if (i > 0) {
+					result << ", ";
+				}
+				result << ExpressionToAliasedString(window.partitions[i]);
+			}
+			separator = " ";
+		}
+		if (!window.orders.empty()) {
+			result << separator << "ORDER BY ";
+			for (idx_t i = 0; i < window.orders.size(); i++) {
+				if (i > 0) {
+					result << ", ";
+				}
+				result << OrderByToAliasedString(window.orders[i]);
+			}
+			separator = " ";
+		}
+
+		string units = "ROWS";
+		string frame_start = WindowFrameStartToAliasedString(window, units);
+		string frame_end = WindowFrameEndToAliasedString(window, units);
+		if (window.exclude_clause != WindowExcludeMode::NO_OTHER) {
+			if (frame_start.empty()) {
+				frame_start = "UNBOUNDED PRECEDING";
+			}
+			if (frame_end.empty()) {
+				frame_end = "CURRENT ROW";
+				units = "RANGE";
+			}
+		}
+		if (!frame_start.empty() || !frame_end.empty()) {
+			result << separator << units;
+			if (!frame_start.empty() && !frame_end.empty()) {
+				result << " BETWEEN " << frame_start << " AND " << frame_end;
+			} else if (!frame_start.empty()) {
+				result << " " << frame_start;
+			} else {
+				result << " " << frame_end;
+			}
+			separator = " ";
+		}
+		switch (window.exclude_clause) {
+		case WindowExcludeMode::NO_OTHER:
+			break;
+		case WindowExcludeMode::CURRENT_ROW:
+			result << separator << "EXCLUDE CURRENT ROW";
+			break;
+		case WindowExcludeMode::GROUP:
+			result << separator << "EXCLUDE GROUP";
+			break;
+		case WindowExcludeMode::TIES:
+			result << separator << "EXCLUDE TIES";
+			break;
+		default:
+			throw NotImplementedException("Not implemented window exclude mode");
+		}
+		result << ")";
+		return result.str();
 	}
 
 	//--------------------------------------------------------------------------
@@ -400,14 +663,20 @@ private:
 				expr_str << "TRY(" << ExpressionToAliasedString(op_expr.children[0]) << ")";
 				break;
 			default:
-				throw NotImplementedException("Not implemented BOUND_OPERATOR subtype for ExpressionToAliasedString: %s",
-				                              ExpressionTypeToString(op_expr.GetExpressionType()));
+				throw NotImplementedException(
+				    "Not implemented BOUND_OPERATOR subtype for ExpressionToAliasedString: %s",
+				    ExpressionTypeToString(op_expr.GetExpressionType()));
 			}
 			break;
 		}
 		case ExpressionClass::BOUND_UNNEST: {
 			const BoundUnnestExpression &unnest_expr = expression->Cast<BoundUnnestExpression>();
 			expr_str << "UNNEST(" << ExpressionToAliasedString(unnest_expr.child) << ")";
+			break;
+		}
+		case ExpressionClass::BOUND_WINDOW: {
+			const BoundWindowExpression &window_expr = expression->Cast<BoundWindowExpression>();
+			expr_str << WindowExpressionToAliasedString(window_expr);
 			break;
 		}
 		default:
@@ -705,6 +974,52 @@ private:
 				conditions.emplace_back(ExpressionToAliasedString(expr));
 			}
 			return make_uniq<AstFilterNode>(std::move(conditions));
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_WINDOW: {
+			const LogicalWindow &window = op->Cast<LogicalWindow>();
+			const idx_t table_index = window.window_index;
+
+			LPTS_DEBUG_PRINT("[LPTS-AST] Building LOGICAL_WINDOW (table_index=" + std::to_string(table_index) + ")");
+
+			vector<string> expressions;
+			vector<string> cte_column_names;
+			unordered_set<string> seen_names;
+
+			for (const ColumnBinding &binding : window.children[0]->GetColumnBindings()) {
+				const unique_ptr<ColStruct> &src = FindColumnBinding(binding, "window child output");
+				const string passthrough_name = src->ToUniqueColumnName();
+				expressions.push_back(passthrough_name);
+				cte_column_names.push_back(passthrough_name);
+				seen_names.insert(passthrough_name);
+			}
+
+			for (idx_t i = 0; i < window.expressions.size(); i++) {
+				if (window.expressions[i]->GetExpressionClass() != ExpressionClass::BOUND_WINDOW) {
+					throw NotImplementedException("AstBuilder: only BOUND_WINDOW supported in LOGICAL_WINDOW");
+				}
+				const BoundWindowExpression &window_expr = window.expressions[i]->Cast<BoundWindowExpression>();
+				const string expr_str = WindowExpressionToAliasedString(window_expr);
+				expressions.push_back(expr_str);
+
+				string alias = window.expressions[i]->HasAlias() ? window.expressions[i]->GetAlias()
+				                                                 : "window_" + std::to_string(i);
+				string unique_name = "t" + std::to_string(table_index) + "_" + alias;
+				for (idx_t suffix = i; seen_names.count(unique_name); suffix++) {
+					alias = "window_" + std::to_string(i) + "_" + std::to_string(suffix);
+					unique_name = "t" + std::to_string(table_index) + "_" + alias;
+				}
+				seen_names.insert(unique_name);
+
+				auto new_col = make_uniq<ColStruct>(table_index, expr_str, std::move(alias));
+				cte_column_names.push_back(new_col->ToUniqueColumnName());
+				column_map[MappableColumnBinding(ColumnBinding(table_index, i))] = std::move(new_col);
+			}
+
+			LPTS_DEBUG_PRINT("[LPTS-AST] Built LOGICAL_WINDOW with " + std::to_string(window.expressions.size()) +
+			                 " window expressions");
+			return make_uniq<AstProjectNode>(std::move(expressions), std::move(cte_column_names), table_index);
 		}
 
 		//----------------------------------------------------------------------

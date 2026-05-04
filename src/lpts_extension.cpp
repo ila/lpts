@@ -58,7 +58,7 @@ static unique_ptr<LogicalOperator> PlanQuery(ClientContext &context, const strin
 	Planner planner(context);
 	planner.CreatePlan(parser.statements[0]->Copy());
 
-	// Temporarily disable optimizers that produce unsupported plan structures
+	// Temporarily disable optimizers that produce plan structures LPTS has not implemented yet.
 	auto &config = DBConfig::GetConfig(context);
 	auto saved = config.options.disabled_optimizers;
 	config.options.disabled_optimizers.insert(OptimizerType::COLUMN_LIFETIME);
@@ -70,9 +70,47 @@ static unique_ptr<LogicalOperator> PlanQuery(ClientContext &context, const strin
 	config.options.disabled_optimizers.insert(OptimizerType::MATERIALIZED_CTE);
 	config.options.disabled_optimizers.insert(OptimizerType::COMMON_SUBPLAN);
 
+#if LPTS_DEBUG
+	{
+		string dump = "[LPTS] disabled_optimizers BEFORE LPTS optimize: {";
+		for (auto &t : config.options.disabled_optimizers) {
+			dump += OptimizerTypeToString(t) + ", ";
+		}
+		dump += "}";
+		LPTS_DEBUG_PRINT(dump);
+	}
+#endif
+
 	Optimizer optimizer(*planner.binder, context);
 	auto result = optimizer.Optimize(std::move(planner.plan));
 
+#if LPTS_DEBUG
+	// Re-enable ALL optimizers (clear disabled set) and re-plan for side-by-side comparison.
+	config.options.disabled_optimizers.clear();
+	{
+		string dump = "[LPTS] disabled_optimizers BEFORE full optimize: {";
+		for (auto &t : config.options.disabled_optimizers) {
+			dump += OptimizerTypeToString(t) + ", ";
+		}
+		dump += "}";
+		LPTS_DEBUG_PRINT(dump);
+	}
+
+	Parser full_parser;
+	full_parser.ParseQuery(query);
+	Planner full_planner(context);
+	full_planner.CreatePlan(full_parser.statements[0]->Copy());
+	Optimizer full_optimizer(*full_planner.binder, context);
+	auto full_result = full_optimizer.Optimize(std::move(full_planner.plan));
+
+	LPTS_DEBUG_PRINT("[LPTS] ===== Plan WITH LPTS-disabled optimizers (used by LPTS) =====");
+	result->Print();
+	LPTS_DEBUG_PRINT("[LPTS] ===== Plan WITH ALL optimizers enabled =====");
+	full_result->Print();
+	LPTS_DEBUG_PRINT("[LPTS] ===== end plan comparison =====");
+#endif
+
+	// Restore original disabled_optimizers set
 	config.options.disabled_optimizers = saved;
 	return result;
 }

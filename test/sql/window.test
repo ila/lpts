@@ -1,0 +1,51 @@
+# name: test/sql/window.test
+# description: test lpts with LOGICAL_WINDOW queries
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE window_items (id INTEGER, grp VARCHAR, val INTEGER);
+
+statement ok
+INSERT INTO window_items VALUES
+	(1, 'a', 10),
+	(2, 'a', 20),
+	(3, 'a', 20),
+	(4, 'b', 5),
+	(5, 'b', 15);
+
+# --- row_number() over (order by id) ---
+
+query I
+PRAGMA lpts_check('SELECT id, row_number() OVER (ORDER BY id) AS rn FROM window_items ORDER BY id');
+----
+true
+
+# --- rank() and dense_rank() with partition by and multi-column order by ---
+
+query I
+PRAGMA lpts_check('SELECT grp, id, rank() OVER (PARTITION BY grp ORDER BY val DESC, id ASC) AS rnk, dense_rank() OVER (PARTITION BY grp ORDER BY val DESC, id ASC) AS drnk FROM window_items ORDER BY grp, id');
+----
+true
+
+# --- aggregate windows: count(*) and sum(...) ---
+
+query I
+PRAGMA lpts_check('SELECT grp, id, count(*) OVER (PARTITION BY grp) AS grp_count, sum(val) OVER (PARTITION BY grp ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_sum FROM window_items ORDER BY grp, id');
+----
+true
+
+# --- window output consumed by parent filter/order via subquery ---
+
+query I
+PRAGMA lpts_check('SELECT grp, id, rn FROM (SELECT grp, id, row_number() OVER (PARTITION BY grp ORDER BY val DESC, id ASC) AS rn FROM window_items) ranked WHERE rn <= 2 ORDER BY grp, rn');
+----
+true
+
+# --- lead()/lag() with offset and default ---
+
+query I
+PRAGMA lpts_check('SELECT grp, id, lag(val, 1, -1) OVER (PARTITION BY grp ORDER BY id) AS prev_val, lead(val, 1, -1) OVER (PARTITION BY grp ORDER BY id) AS next_val FROM window_items ORDER BY grp, id');
+----
+true

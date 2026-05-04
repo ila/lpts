@@ -9,6 +9,7 @@
 #include "lpts_helpers.hpp"
 #include "lpts_debug.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"
 #include "duckdb/planner/expression/bound_lambda_expression.hpp"
@@ -20,6 +21,24 @@
 #include "duckdb/function/lambda_functions.hpp"
 
 namespace duckdb {
+
+namespace {
+
+string QuoteTableWithOptionalSuffix(const string &table_name) {
+	static const string at_suffix = " AT (";
+	auto suffix_pos = table_name.find(at_suffix);
+	if (suffix_pos == string::npos) {
+		return KeywordHelper::WriteOptionallyQuoted(table_name);
+	}
+	return KeywordHelper::WriteOptionallyQuoted(table_name.substr(0, suffix_pos)) + table_name.substr(suffix_pos);
+}
+
+string QualifiedTableName(const string &catalog, const string &schema, const string &table_name) {
+	return KeywordHelper::WriteOptionallyQuoted(catalog) + "." + KeywordHelper::WriteOptionallyQuoted(schema) + "." +
+	       QuoteTableWithOptionalSuffix(table_name);
+}
+
+} // namespace
 
 //------------------------------------------------------------------------------
 // ToQuery() implementations for each IR node type.
@@ -100,7 +119,7 @@ string GetNode::ToQuery() {
 	get_str << " FROM ";
 	if (!catalog.empty()) {
 		// Fully-qualified: catalog.schema.table (DuckDB dialect)
-		get_str << catalog << "." << schema << "." << table_name;
+		get_str << QualifiedTableName(catalog, schema, table_name);
 	} else {
 		// Unqualified: table function or simple table name
 		get_str << table_name;

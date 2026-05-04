@@ -168,3 +168,63 @@ query I
 PRAGMA lpts_check('SELECT sum(l_extendedprice * (1 - l_discount)) AS revenue FROM lineitem, part WHERE (p_partkey = l_partkey AND p_brand = ''Brand#12'' AND p_container IN (''SM CASE'', ''SM BOX'', ''SM PACK'', ''SM PKG'') AND l_quantity >= 1 AND l_quantity <= 11 AND p_size BETWEEN 1 AND 5 AND l_shipmode IN (''AIR'', ''AIR REG'') AND l_shipinstruct = ''DELIVER IN PERSON'') OR (p_partkey = l_partkey AND p_brand = ''Brand#23'' AND p_container IN (''MED BAG'', ''MED BOX'', ''MED PKG'', ''MED PACK'') AND l_quantity >= 10 AND l_quantity <= 20 AND p_size BETWEEN 1 AND 10 AND l_shipmode IN (''AIR'', ''AIR REG'') AND l_shipinstruct = ''DELIVER IN PERSON'') OR (p_partkey = l_partkey AND p_brand = ''Brand#34'' AND p_container IN (''LG CASE'', ''LG BOX'', ''LG PACK'', ''LG PKG'') AND l_quantity >= 20 AND l_quantity <= 30 AND p_size BETWEEN 1 AND 15 AND l_shipmode IN (''AIR'', ''AIR REG'') AND l_shipinstruct = ''DELIVER IN PERSON'')');
 ----
 true
+
+# ============================================================
+# Q2 — correlated scalar subquery: min(ps_supplycost) per part+region
+# Operators: GET x5, FILTER, JOIN x4, AGGREGATE, DELIM_JOIN [SINGLE→LEFT], ORDER, LIMIT
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT s_acctbal, s_name, n_name, p_partkey, p_mfgr, s_address, s_phone, s_comment FROM part, supplier, partsupp, nation, region WHERE p_partkey = ps_partkey AND s_suppkey = ps_suppkey AND p_size = 15 AND p_type LIKE ''%BRASS'' AND s_nationkey = n_nationkey AND n_regionkey = r_regionkey AND r_name = ''EUROPE'' AND ps_supplycost = (SELECT min(ps_supplycost) FROM partsupp, supplier, nation, region WHERE p_partkey = ps_partkey AND s_suppkey = ps_suppkey AND s_nationkey = n_nationkey AND n_regionkey = r_regionkey AND r_name = ''EUROPE'') ORDER BY s_acctbal DESC, n_name, s_name, p_partkey LIMIT 100');
+----
+true
+
+# ============================================================
+# Q4 — EXISTS correlated subquery → DELIM_JOIN [SEMI]
+# Operators: GET x2, FILTER, AGGREGATE, DELIM_JOIN [SEMI], ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT o_orderpriority, count(*) AS order_count FROM orders WHERE o_orderdate >= CAST(''1993-07-01'' AS DATE) AND o_orderdate < CAST(''1993-10-01'' AS DATE) AND EXISTS (SELECT * FROM lineitem WHERE l_orderkey = o_orderkey AND l_commitdate < l_receiptdate) GROUP BY o_orderpriority ORDER BY o_orderpriority');
+----
+true
+
+# ============================================================
+# Q17 — correlated scalar subquery (0.2 * avg per part) → DELIM_JOIN [LEFT]
+# Operators: GET x2, FILTER, JOIN, AGGREGATE, DELIM_JOIN [LEFT], AGGREGATE
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT sum(l_extendedprice) / 7.0 AS avg_yearly FROM lineitem, part WHERE p_partkey = l_partkey AND p_brand = ''Brand#23'' AND p_container = ''MED BOX'' AND l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE l_partkey = p_partkey)');
+----
+true
+
+# ============================================================
+# Q20 — nested IN subqueries + correlated scalar subquery → DELIM_JOIN + RIGHT_SEMI join
+# Operators: GET x4, FILTER, JOIN x3, AGGREGATE, DELIM_JOIN, SEMI, ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT s_name, s_address FROM supplier, nation WHERE s_suppkey IN (SELECT ps_suppkey FROM partsupp WHERE ps_partkey IN (SELECT p_partkey FROM part WHERE p_name LIKE ''forest%'') AND ps_availqty > (SELECT 0.5 * sum(l_quantity) FROM lineitem WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey AND l_shipdate >= CAST(''1994-01-01'' AS DATE) AND l_shipdate < CAST(''1995-01-01'' AS DATE))) AND s_nationkey = n_nationkey AND n_name = ''CANADA'' ORDER BY s_name');
+----
+true
+
+# ============================================================
+# Q21 — two correlated subqueries (EXISTS + NOT EXISTS) → two DELIM_JOINs [SEMI, ANTI]
+# Operators: GET x4, FILTER, JOIN x3, AGGREGATE, DELIM_JOIN x2, ORDER, LIMIT
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT s_name, count(*) AS numwait FROM supplier, lineitem l1, orders, nation WHERE s_suppkey = l1.l_suppkey AND o_orderkey = l1.l_orderkey AND o_orderstatus = ''F'' AND l1.l_receiptdate > l1.l_commitdate AND EXISTS (SELECT * FROM lineitem l2 WHERE l2.l_orderkey = l1.l_orderkey AND l2.l_suppkey <> l1.l_suppkey) AND NOT EXISTS (SELECT * FROM lineitem l3 WHERE l3.l_orderkey = l1.l_orderkey AND l3.l_suppkey <> l1.l_suppkey AND l3.l_receiptdate > l3.l_commitdate) AND s_nationkey = n_nationkey AND n_name = ''SAUDI ARABIA'' GROUP BY s_name ORDER BY numwait DESC, s_name LIMIT 100');
+----
+true
+
+# ============================================================
+# Q22 — NOT EXISTS + scalar subquery + substring IN → DELIM_JOIN [ANTI], MARK join
+# Operators: GET x2, FILTER, JOIN, AGGREGATE, CHUNK_GET, DELIM_JOIN [ANTI], ORDER
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT cntrycode, count(*) AS numcust, sum(c_acctbal) AS totacctbal FROM (SELECT substring(c_phone, 1, 2) AS cntrycode, c_acctbal FROM customer WHERE substring(c_phone, 1, 2) IN (''13'', ''31'', ''23'', ''29'', ''30'', ''18'', ''17'') AND c_acctbal > (SELECT avg(c_acctbal) FROM customer WHERE c_acctbal > 0.00 AND substring(c_phone, 1, 2) IN (''13'', ''31'', ''23'', ''29'', ''30'', ''18'', ''17'')) AND NOT EXISTS (SELECT * FROM orders WHERE o_custkey = c_custkey)) AS custsale GROUP BY cntrycode ORDER BY cntrycode');
+----
+true

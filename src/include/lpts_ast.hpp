@@ -266,6 +266,50 @@ public:
 	}
 };
 
+/// DELIM_GET node: a duplicate-eliminated scan driven by a parent DELIM_JOIN.
+/// In SQL: SELECT DISTINCT {source_col_names} FROM {left_cte}.
+/// Has no children. The source CTE name is registered by the parent AstDelimJoinNode in Phase 2.
+class AstDelimGetNode : public AstNode {
+public:
+	idx_t table_index;               ///< Unique table index for this DELIM_GET.
+	vector<string> cte_column_names; ///< Exposed column names (e.g. "tN_p_partkey").
+	vector<string> source_col_names; ///< Column names to SELECT from the left CTE (e.g. "t3_p_partkey").
+
+	AstDelimGetNode(idx_t table_index_p, vector<string> cte_column_names_p, vector<string> source_col_names_p)
+	    : table_index(table_index_p), cte_column_names(std::move(cte_column_names_p)),
+	      source_col_names(std::move(source_col_names_p)) {
+	}
+
+	string ToString(int indent = 0) const override;
+	string NodeType() const override {
+		return "DelimGet";
+	}
+};
+
+/// DELIM_JOIN node: a duplicate-eliminating join used to decorrelate subqueries.
+/// children[0] = outer (left) subtree, children[1] = inner (right) subtree containing AstDelimGetNode(s).
+/// In Phase 2, flattened as: left CTEs, then DELIM_GET CTEs (SELECT DISTINCT from left), then right CTEs, then JOIN.
+class AstDelimJoinNode : public AstNode {
+public:
+	JoinType join_type;
+	vector<string> conditions;         ///< Join conditions as strings.
+	vector<string> cte_column_names;   ///< Output column names.
+	vector<idx_t> delim_table_indices; ///< table_indices of ALL AstDelimGetNodes in the right subtree.
+
+	string mark_expression; ///< For MARK→LEFT conversion: "(rhs_key IS NOT NULL)" or empty.
+
+	AstDelimJoinNode(JoinType join_type_p, vector<string> conditions_p, vector<string> cte_column_names_p,
+	                 vector<idx_t> delim_table_indices_p, string mark_expression_p = "")
+	    : join_type(join_type_p), conditions(std::move(conditions_p)), cte_column_names(std::move(cte_column_names_p)),
+	      delim_table_indices(std::move(delim_table_indices_p)), mark_expression(std::move(mark_expression_p)) {
+	}
+
+	string ToString(int indent = 0) const override;
+	string NodeType() const override {
+		return "DelimJoin";
+	}
+};
+
 /// Pretty-print the full AST tree starting from the given root node.
 string PrintAst(const AstNode &root);
 

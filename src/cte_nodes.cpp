@@ -179,6 +179,17 @@ string JoinNode::ToQuery() {
 	} else {
 		join_str << "SELECT " << VecToSeparatedList(cte_column_list) << " FROM ";
 	}
+	// RIGHT_SEMI / RIGHT_ANTI: the preserved (output) side is the RIGHT CTE.
+	// Emit as "right SEMI/ANTI JOIN left" so the preserved side is on the left in SQL.
+	// cte_column_list already contains only the preserved side's columns (from GetColumnBindings).
+	if (join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI) {
+		join_str << right_cte_name << " ";
+		join_str << (join_type == JoinType::RIGHT_SEMI ? "SEMI" : "ANTI");
+		join_str << " JOIN " << left_cte_name;
+		join_str << " ON " << VecToSeparatedList(join_conditions, " AND ");
+		return join_str.str();
+	}
+
 	join_str << left_cte_name;
 	join_str << " ";
 	switch (join_type) {
@@ -262,6 +273,18 @@ string DistinctNode::ToQuery() {
 	std::ostringstream distinct_str;
 	distinct_str << "SELECT DISTINCT * FROM " << child_cte_name;
 	return distinct_str.str();
+}
+
+string DelimGetNode::ToQuery() {
+	std::ostringstream s;
+	s << "SELECT DISTINCT ";
+	if (source_cols.empty()) {
+		s << "*";
+	} else {
+		s << VecToSeparatedList(source_cols);
+	}
+	s << " FROM " << source_cte_name;
+	return s.str();
 }
 
 /// Serialize the entire CTE list into a SQL string.

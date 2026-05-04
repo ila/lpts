@@ -267,6 +267,23 @@ public:
 	string ToQuery() override;
 };
 
+class CteSetOperationNode : public CteNode {
+	string left_cte_name;
+	string right_cte_name;
+	string op_name;
+	const bool is_all;
+
+public:
+	~CteSetOperationNode() override = default;
+	CteSetOperationNode(const size_t index, vector<string> cte_column_names, string _left_cte_name,
+	                    string _right_cte_name, string _op_name, const bool all)
+	    : CteNode(index, "setop_" + std::to_string(index), std::move(cte_column_names)),
+	      left_cte_name(std::move(_left_cte_name)), right_cte_name(std::move(_right_cte_name)),
+	      op_name(std::move(_op_name)), is_all(all) {
+	}
+	string ToQuery() override;
+};
+
 /// ORDER BY node — wraps the child CTE with an ORDER BY clause.
 class OrderNode : public CteNode {
 	string child_cte_name;

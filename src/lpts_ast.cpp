@@ -222,6 +222,34 @@ InsertionOrderPreservingMap<string> AstUnionNode::GetExtraInfo() const {
 }
 
 //------------------------------------------------------------------------------
+// AstSetOperationNode
+//------------------------------------------------------------------------------
+
+string AstSetOperationNode::ToString(int indent) const {
+	string result = Indent(indent) + op_name + (is_all ? "All" : "");
+	result += " (columns=" + std::to_string(cte_column_names.size()) + ")";
+	for (auto &child : children) {
+		result += "\n" + child->ToString(indent + 2);
+	}
+	return result;
+}
+
+InsertionOrderPreservingMap<string> AstSetOperationNode::GetExtraInfo() const {
+	InsertionOrderPreservingMap<string> info;
+	info.insert("Type", op_name + (is_all ? " ALL" : ""));
+	string cols = "[";
+	for (size_t i = 0; i < cte_column_names.size(); i++) {
+		if (i > 0) {
+			cols += ", ";
+		}
+		cols += cte_column_names[i];
+	}
+	cols += "]";
+	info.insert("Columns", std::move(cols));
+	return info;
+}
+
+//------------------------------------------------------------------------------
 // AstInsertNode
 //------------------------------------------------------------------------------
 

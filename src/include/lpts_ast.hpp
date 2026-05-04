@@ -168,6 +168,24 @@ public:
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
+/// EXCEPT / INTERSECT node.
+class AstSetOperationNode : public AstNode {
+public:
+	string op_name;
+	bool is_all;
+	vector<string> cte_column_names; ///< Output column names derived from the left-hand side.
+
+	AstSetOperationNode(string op_name, bool is_all, vector<string> cte_column_names)
+	    : op_name(std::move(op_name)), is_all(is_all), cte_column_names(std::move(cte_column_names)) {
+	}
+
+	string ToString(int indent = 0) const override;
+	string NodeType() const override {
+		return "SetOperation";
+	}
+	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
+};
+
 /// INSERT INTO node.
 class AstInsertNode : public AstNode {
 public:

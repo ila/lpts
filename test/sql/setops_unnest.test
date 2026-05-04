@@ -1,0 +1,72 @@
+# name: test/sql/setops_unnest.test
+# description: test LPTS round-trips for set operations, dummy scans, and UNNEST
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE left_t (id INTEGER, label VARCHAR);
+
+statement ok
+CREATE TABLE right_t (id INTEGER, label VARCHAR);
+
+statement ok
+INSERT INTO left_t VALUES (1, 'a'), (1, 'a'), (2, 'b'), (3, 'c'), (5, 'e');
+
+statement ok
+INSERT INTO right_t VALUES (1, 'a'), (3, 'c'), (3, 'c'), (4, 'd');
+
+query I
+PRAGMA lpts_check('SELECT id, label FROM left_t EXCEPT SELECT id, label FROM right_t');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT id, label FROM left_t EXCEPT ALL SELECT id, label FROM right_t');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT id, label FROM left_t INTERSECT SELECT id, label FROM right_t');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT id, label FROM left_t INTERSECT ALL SELECT id, label FROM right_t');
+----
+true
+
+query I rowsort
+PRAGMA lpts_exec('SELECT id FROM left_t EXCEPT ALL SELECT id FROM right_t');
+----
+1
+2
+5
+
+query I
+PRAGMA lpts_check('SELECT 42 AS answer');
+----
+true
+
+query II
+PRAGMA lpts_exec('SELECT 42 AS answer, ''ok'' AS label');
+----
+42	ok
+
+statement ok
+CREATE TABLE list_t (id INTEGER, vals INTEGER[]);
+
+statement ok
+INSERT INTO list_t VALUES (1, [10, 20]), (2, [30]), (3, []);
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, unnest(vals) AS val FROM list_t');
+----
+1	10
+1	20
+2	30
+
+query I
+PRAGMA lpts_check('SELECT id, unnest(vals) AS val FROM list_t');
+----
+true

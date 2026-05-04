@@ -23,6 +23,7 @@
 #include "lpts_helpers.hpp"
 #include "lpts_debug.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -36,6 +37,7 @@
 #include "duckdb/planner/expression/bound_lambdaref_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_unnest_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/function/lambda_functions.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -49,12 +51,14 @@
 #include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_distinct.hpp"
+#include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_expression_get.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/operator/logical_delim_get.hpp"
+#include "duckdb/planner/operator/logical_unnest.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 namespace duckdb {
@@ -120,7 +124,8 @@ private:
 			return it->second;
 		}
 		Connection con(*context.db);
-		auto result = con.Query("SELECT id FROM " + catalog_name + ".current_snapshot()");
+		auto result =
+		    con.Query("SELECT id FROM " + KeywordHelper::WriteOptionallyQuoted(catalog_name) + ".current_snapshot()");
 		idx_t snap_id = DConstants::INVALID_INDEX;
 		if (!result->HasError() && result->RowCount() > 0) {
 			snap_id = result->GetValue(0, 0).GetValue<idx_t>();
@@ -136,6 +141,15 @@ private:
 	/// Maps DELIM_GET table_index → source column names (from the outer/left CTE).
 	/// Populated by PreregisterDelimGetColumns before the right subtree is traversed.
 	unordered_map<idx_t, vector<string>> delim_get_source_col_names;
+
+	const unique_ptr<ColStruct> &FindColumnBinding(const ColumnBinding &binding, const char *context) const {
+		auto it = column_map.find(MappableColumnBinding(binding));
+		if (it != column_map.end()) {
+			return it->second;
+		}
+		throw InternalException("LPTS: %s column ref (%llu,%llu) not in column_map", context,
+		                        (unsigned long long)binding.table_index, (unsigned long long)binding.column_index);
+	}
 
 	//--------------------------------------------------------------------------
 	// CollectLambdaParamNames
@@ -178,7 +192,7 @@ private:
 		switch (e_class) {
 		case ExpressionClass::BOUND_COLUMN_REF: {
 			const BoundColumnRefExpression &bcr = expression->Cast<BoundColumnRefExpression>();
-			const unique_ptr<ColStruct> &col_struct = column_map.at(MappableColumnBinding(bcr.binding));
+			const unique_ptr<ColStruct> &col_struct = FindColumnBinding(bcr.binding, "expression");
 			expr_str << col_struct->ToUniqueColumnName();
 			break;
 		}
@@ -391,6 +405,11 @@ private:
 			}
 			break;
 		}
+		case ExpressionClass::BOUND_UNNEST: {
+			const BoundUnnestExpression &unnest_expr = expression->Cast<BoundUnnestExpression>();
+			expr_str << "UNNEST(" << ExpressionToAliasedString(unnest_expr.child) << ")";
+			break;
+		}
 		default:
 			throw NotImplementedException("Unsupported expression for ExpressionToAliasedString: %s",
 			                              ExpressionTypeToString(expression->type));
@@ -443,7 +462,8 @@ private:
 			out.push_back(subtree->Cast<LogicalDelimGet>().table_index);
 			return;
 		}
-		if (subtree->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		if (subtree->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+		    subtree->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
 			return; // nested delim join — not our responsibility
 		}
 		for (const auto &child : subtree->children) {
@@ -488,7 +508,8 @@ private:
 			delim_get_source_col_names[dg_ti] = std::move(source_names);
 			return;
 		}
-		if (subtree->type != LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		if (subtree->type != LogicalOperatorType::LOGICAL_DELIM_JOIN &&
+		    subtree->type != LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
 			for (const auto &child : subtree->children) {
 				PreregisterDelimGetColumns(child.get(), dup_cols);
 			}
@@ -647,17 +668,10 @@ private:
 				column_map[MappableColumnBinding(cb)] = std::move(col_struct);
 			}
 
-			// COUNT(*) / ROWID-only scans: emit a dummy column so the CTE body
-			// is valid SQL (SELECT 1 FROM ...). This covers both empty scans and
-			// virtual-column-only scans (e.g. DuckLake ROWID for COUNT(*)).
-			bool has_real_column = false;
-			for (auto &cn : column_names) {
-				if (cn != "rowid") {
-					has_real_column = true;
-					break;
-				}
-			}
-			if (!has_real_column) {
+			// COUNT(*) scans can have no projected columns. Emit a dummy column
+			// only in that case. Virtual-column-only scans (e.g. rowid) must keep
+			// the virtual column because parents may reference its CTE alias.
+			if (column_names.empty()) {
 				column_names.clear();
 				cte_column_names.clear();
 				column_names.push_back("1");
@@ -718,14 +732,14 @@ private:
 						auto &child = func.children[0];
 						if (child->type == ExpressionType::BOUND_COLUMN_REF) {
 							auto &bcr = child->Cast<BoundColumnRefExpression>();
-							auto &src = column_map.at(MappableColumnBinding(bcr.binding));
+							auto &src = FindColumnBinding(bcr.binding, "compressed projection");
 							column_map[MappableColumnBinding(new_cb)] =
 							    make_uniq<ColStruct>(src->table_index, src->column_name, src->alias);
 						}
 					} else if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 						// pass-through column ref: preserve source's table_index
 						auto &bcr = expr->Cast<BoundColumnRefExpression>();
-						auto &src = column_map.at(MappableColumnBinding(bcr.binding));
+						auto &src = FindColumnBinding(bcr.binding, "compressed projection");
 						column_map[MappableColumnBinding(new_cb)] =
 						    make_uniq<ColStruct>(src->table_index, src->column_name, src->alias);
 					}
@@ -743,7 +757,15 @@ private:
 
 				if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 					BoundColumnRefExpression &bcr = expr->Cast<BoundColumnRefExpression>();
-					unique_ptr<ColStruct> &desc = column_map.at(MappableColumnBinding(bcr.binding));
+					ColumnBinding lookup_binding = bcr.binding;
+					if (column_map.find(MappableColumnBinding(lookup_binding)) == column_map.end() &&
+					    !proj.children.empty()) {
+						auto child_bindings = proj.children[0]->GetColumnBindings();
+						if (lookup_binding.column_index < child_bindings.size()) {
+							lookup_binding = child_bindings[lookup_binding.column_index];
+						}
+					}
+					const unique_ptr<ColStruct> &desc = FindColumnBinding(lookup_binding, "projection");
 					expressions.push_back(desc->ToUniqueColumnName());
 					string col_name = desc->column_name;
 					string alias = desc->alias;
@@ -779,6 +801,32 @@ private:
 					cte_column_names.push_back(new_col->ToUniqueColumnName());
 					column_map[MappableColumnBinding(new_cb)] = std::move(new_col);
 				}
+			}
+
+			return make_uniq<AstProjectNode>(std::move(expressions), std::move(cte_column_names), table_index);
+		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_UNNEST: {
+			const LogicalUnnest &unnest = op->Cast<LogicalUnnest>();
+			const idx_t table_index = unnest.unnest_index;
+
+			vector<string> expressions;
+			vector<string> cte_column_names;
+
+			auto child_bindings = unnest.children[0]->GetColumnBindings();
+			for (auto &binding : child_bindings) {
+				auto &src = FindColumnBinding(binding, "unnest");
+				expressions.push_back(src->ToUniqueColumnName());
+				cte_column_names.push_back(src->ToUniqueColumnName());
+			}
+
+			for (idx_t i = 0; i < unnest.expressions.size(); i++) {
+				string expr_str = ExpressionToAliasedString(unnest.expressions[i]);
+				expressions.push_back(expr_str);
+				auto col_struct = make_uniq<ColStruct>(table_index, "unnest_" + std::to_string(i), "");
+				cte_column_names.push_back(col_struct->ToUniqueColumnName());
+				column_map[MappableColumnBinding(ColumnBinding(table_index, i))] = std::move(col_struct);
 			}
 
 			return make_uniq<AstProjectNode>(std::move(expressions), std::move(cte_column_names), table_index);
@@ -904,7 +952,7 @@ private:
 				if (bcr.binding == new_cb) {
 					continue;
 				}
-				const auto &new_col = column_map.at(MappableColumnBinding(new_cb));
+				const auto &new_col = FindColumnBinding(new_cb, "aggregate remap");
 				column_map[MappableColumnBinding(bcr.binding)] =
 				    make_uniq<ColStruct>(new_col->table_index, new_col->column_name, new_col->alias);
 			}
@@ -946,7 +994,7 @@ private:
 
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
-				unique_ptr<ColStruct> &col_struct = column_map.at(MappableColumnBinding(cb));
+				const unique_ptr<ColStruct> &col_struct = FindColumnBinding(cb, "join output");
 				cte_column_names.push_back(col_struct->ToUniqueColumnName());
 			}
 
@@ -983,7 +1031,7 @@ private:
 			}
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
-				unique_ptr<ColStruct> &col_struct = column_map.at(MappableColumnBinding(cb));
+				const unique_ptr<ColStruct> &col_struct = FindColumnBinding(cb, "any join output");
 				cte_column_names.push_back(col_struct->ToUniqueColumnName());
 			}
 			return make_uniq<AstJoinNode>(any_join.join_type, std::move(conditions), std::move(cte_column_names));
@@ -993,7 +1041,7 @@ private:
 			vector<string> cross_condition = {"(TRUE)"};
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
-				unique_ptr<ColStruct> &col_struct = column_map.at(MappableColumnBinding(cb));
+				const unique_ptr<ColStruct> &col_struct = FindColumnBinding(cb, "cross product output");
 				cte_column_names.push_back(col_struct->ToUniqueColumnName());
 			}
 			return make_uniq<AstJoinNode>(JoinType::INNER, std::move(cross_condition), std::move(cte_column_names));
@@ -1007,12 +1055,29 @@ private:
 			const auto &lhs_bindings = op->children[0]->GetColumnBindings();
 			const auto &union_bindings = op->GetColumnBindings();
 			for (size_t i = 0; i < lhs_bindings.size(); ++i) {
-				const unique_ptr<ColStruct> &lhs_col = column_map.at(MappableColumnBinding(lhs_bindings[i]));
+				const unique_ptr<ColStruct> &lhs_col = FindColumnBinding(lhs_bindings[i], "union lhs");
 				auto new_col = make_uniq<ColStruct>(table_index, lhs_col->column_name, lhs_col->alias);
 				cte_column_names.push_back(new_col->ToUniqueColumnName());
 				column_map[MappableColumnBinding(union_bindings[i])] = std::move(new_col);
 			}
 			return make_uniq<AstUnionNode>(set_op.setop_all, std::move(cte_column_names));
+		}
+
+		case LogicalOperatorType::LOGICAL_EXCEPT:
+		case LogicalOperatorType::LOGICAL_INTERSECT: {
+			const LogicalSetOperation &set_op = op->Cast<LogicalSetOperation>();
+			const idx_t table_index = set_op.table_index;
+			vector<string> cte_column_names;
+			const auto &lhs_bindings = op->children[0]->GetColumnBindings();
+			const auto &setop_bindings = op->GetColumnBindings();
+			for (size_t i = 0; i < lhs_bindings.size(); ++i) {
+				const unique_ptr<ColStruct> &lhs_col = FindColumnBinding(lhs_bindings[i], "setop lhs");
+				auto new_col = make_uniq<ColStruct>(table_index, lhs_col->column_name, lhs_col->alias);
+				cte_column_names.push_back(new_col->ToUniqueColumnName());
+				column_map[MappableColumnBinding(setop_bindings[i])] = std::move(new_col);
+			}
+			string op_name = op->type == LogicalOperatorType::LOGICAL_EXCEPT ? "EXCEPT" : "INTERSECT";
+			return make_uniq<AstSetOperationNode>(std::move(op_name), set_op.setop_all, std::move(cte_column_names));
 		}
 
 		//----------------------------------------------------------------------
@@ -1036,7 +1101,7 @@ private:
 			// Pass bindings through from child.
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
-				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+				cte_column_names.push_back(FindColumnBinding(cb, "order by output")->ToUniqueColumnName());
 			}
 			return make_uniq<AstOrderNode>(std::move(order_items), std::move(cte_column_names));
 		}
@@ -1063,7 +1128,7 @@ private:
 			}
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
-				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+				cte_column_names.push_back(FindColumnBinding(cb, "limit output")->ToUniqueColumnName());
 			}
 			return make_uniq<AstLimitNode>(std::move(limit_str), std::move(offset_str), std::move(cte_column_names));
 		}
@@ -1073,7 +1138,7 @@ private:
 			// LogicalDistinct passes bindings unchanged from child.
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
-				cte_column_names.push_back(column_map.at(MappableColumnBinding(cb))->ToUniqueColumnName());
+				cte_column_names.push_back(FindColumnBinding(cb, "distinct output")->ToUniqueColumnName());
 			}
 			return make_uniq<AstDistinctNode>(std::move(cte_column_names));
 		}
@@ -1083,6 +1148,22 @@ private:
 			const LogicalInsert &insert_op = op->Cast<LogicalInsert>();
 			return make_uniq<AstInsertNode>(insert_op.table.name, insert_op.on_conflict_info.action_type);
 		}
+
+		//----------------------------------------------------------------------
+		case LogicalOperatorType::LOGICAL_DUMMY_SCAN: {
+			// DUMMY_SCAN is DuckDB's single-row input for scalar constant
+			// expressions. Serialize it as a one-row subquery with a dummy column;
+			// parent projections will replace the dummy with their constants.
+			const LogicalDummyScan &dummy = op->Cast<LogicalDummyScan>();
+			const idx_t table_index = dummy.table_index;
+			vector<string> column_names = {"1"};
+			vector<string> cte_column_names = {"t" + std::to_string(table_index) + "_dummy"};
+			column_map[MappableColumnBinding(ColumnBinding(table_index, 0))] =
+			    make_uniq<ColStruct>(table_index, "1", "");
+			return make_uniq<AstGetNode>("", "", "(SELECT 1)", table_index, std::move(column_names),
+			                             std::move(cte_column_names), vector<string>());
+		}
+
 		//----------------------------------------------------------------------
 		case LogicalOperatorType::LOGICAL_EMPTY_RESULT: {
 			// The optimizer replaced a subtree with an empty result (e.g. LIMIT 0).
@@ -1266,7 +1347,8 @@ private:
 		// children[0] = outer (left), children[1] = inner (right, contains DELIM_GET).
 		// The DELIM_GET in the right subtree has already been pre-registered in
 		// PreregisterDelimGetColumns before right child traversal (in RecursiveTraversal).
-		case LogicalOperatorType::LOGICAL_DELIM_JOIN: {
+		case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+		case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN: {
 			const LogicalComparisonJoin &dj = op->Cast<LogicalComparisonJoin>();
 			const idx_t inner_child_idx = dj.delim_flipped ? 0 : 1;
 
@@ -1392,8 +1474,10 @@ private:
 	unique_ptr<AstNode> RecursiveTraversal(unique_ptr<LogicalOperator> &op) {
 		// 1. Recurse into children first (post-order).
 		vector<unique_ptr<AstNode>> child_nodes;
-		if (op->type == LogicalOperatorType::LOGICAL_UNION && op->children.size() >= 2) {
-			// UNION ALL: scope column_map to prevent sibling children from overwriting
+		if ((op->type == LogicalOperatorType::LOGICAL_UNION || op->type == LogicalOperatorType::LOGICAL_EXCEPT ||
+		     op->type == LogicalOperatorType::LOGICAL_INTERSECT) &&
+		    op->children.size() >= 2) {
+			// Set operations: scope column_map to prevent sibling children from overwriting
 			// each other's entries when subtrees share table indices.
 			child_nodes.push_back(RecursiveTraversal(op->children[0]));
 			// Save column_map after first child; restore before each subsequent child
@@ -1406,7 +1490,8 @@ private:
 				child_nodes.push_back(RecursiveTraversal(op->children[ci]));
 			}
 			column_map = std::move(saved_map);
-		} else if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		} else if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+		           op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
 			// DELIM_JOIN: process outer child first (builds column_map for outer cols),
 			// then pre-register DELIM_GET columns, then process inner child.
 			// Always store: children[0] = outer, children[1] = inner — regardless of
@@ -1682,6 +1767,15 @@ private:
 			}
 			// Shouldn't reach here, but just in case
 			throw InternalException("AstFlattener: empty UNION chain");
+		}
+
+		if (type == "SetOperation") {
+			const AstSetOperationNode &s = static_cast<const AstSetOperationNode &>(ast_node);
+			if (children_names.size() != 2) {
+				throw InternalException("AstFlattener: EXCEPT/INTERSECT expected exactly two children");
+			}
+			return make_uniq<CteSetOperationNode>(my_index, s.cte_column_names, children_names[0], children_names[1],
+			                                      s.op_name, s.is_all);
 		}
 
 		if (type == "Order") {

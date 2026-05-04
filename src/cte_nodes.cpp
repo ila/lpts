@@ -97,22 +97,19 @@ string GetNode::ToQuery() {
 	} else {
 		get_str << VecToSeparatedList(column_names);
 	}
-	// An empty table_name means no FROM clause (e.g. EMPTY_RESULT: SELECT NULL::T WHERE false).
-	if (!table_name.empty()) {
-		get_str << " FROM ";
-		if (!catalog.empty()) {
-			// Fully-qualified: catalog.schema.table (DuckDB dialect)
-			get_str << catalog << "." << schema << "." << table_name;
-		} else {
-			// Unqualified: table function or simple table name
-			get_str << table_name;
-			// For table functions, add column aliases so renamed columns resolve correctly.
-			// Skip for DuckLake functions — the _tf alias mismatches when virtual columns
-			// (snapshot_id, rowid) are in the SELECT but not in the function's output schema.
-			if (table_name.find('(') != string::npos && !column_names.empty() &&
-			    table_name.find("ducklake_table_") == string::npos) {
-				get_str << " _tf(" << VecToSeparatedList(column_names) << ")";
-			}
+	get_str << " FROM ";
+	if (!catalog.empty()) {
+		// Fully-qualified: catalog.schema.table (DuckDB dialect)
+		get_str << catalog << "." << schema << "." << table_name;
+	} else {
+		// Unqualified: table function or simple table name
+		get_str << table_name;
+		// For table functions, add column aliases so renamed columns resolve correctly.
+		// Skip for DuckLake functions — the _tf alias mismatches when virtual columns
+		// (snapshot_id, rowid) are in the SELECT but not in the function's output schema.
+		if (table_name.find('(') != string::npos && table_name != "(SELECT 1)" && !column_names.empty() &&
+		    table_name.find("ducklake_table_") == string::npos) {
+			get_str << " _tf(" << VecToSeparatedList(column_names) << ")";
 		}
 	}
 	if (!table_filters.empty()) {

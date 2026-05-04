@@ -1,0 +1,103 @@
+# name: test/sql/cte.test
+# description: test lpts with CHUNK_GET (large IN literal list), CTE_REF, and MATERIALIZED_CTE (WITH clause referenced twice)
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE t (id INTEGER, val INTEGER, label VARCHAR);
+
+statement ok
+INSERT INTO t VALUES (1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c'), (4, 40, 'd'), (5, 50, 'e');
+
+# ============================================================
+# CHUNK_GET: IN with 5 literal values → MARK JOIN via VALUES scan
+# ============================================================
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, val FROM t WHERE val IN (10, 20, 30, 40, 50)');
+----
+1	10
+2	20
+3	30
+4	40
+5	50
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM t WHERE val IN (10, 20, 30, 40, 50)');
+----
+true
+
+# --- partial match ---
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, val FROM t WHERE val IN (10, 30, 50)');
+----
+1	10
+3	30
+5	50
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM t WHERE val IN (10, 30, 50)');
+----
+true
+
+# --- NOT IN: produces an ANTI join; no rows match when all values are listed ---
+
+query II
+PRAGMA lpts_exec('SELECT id, val FROM t WHERE val NOT IN (10, 20, 30, 40, 50)');
+----
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM t WHERE val NOT IN (10, 20, 30, 40, 50)');
+----
+true
+
+# ============================================================
+# MATERIALIZED_CTE + CTE_REF x2: WITH clause used twice
+# DuckDB materializes the CTE body and scans it via two CTE_REF nodes.
+# ============================================================
+
+# CTE appears in both the outer SELECT and a correlated subquery
+query II
+PRAGMA lpts_exec('WITH high AS (SELECT id, val FROM t WHERE val >= 30) SELECT h1.id, h1.val FROM high h1 WHERE h1.val = (SELECT max(val) FROM high)');
+----
+5	50
+
+query I
+PRAGMA lpts_check('WITH high AS (SELECT id, val FROM t WHERE val >= 30) SELECT h1.id, h1.val FROM high h1 WHERE h1.val = (SELECT max(val) FROM high)');
+----
+true
+
+# CTE self-joined
+query I rowsort
+PRAGMA lpts_exec('WITH numbered AS (SELECT id, val FROM t) SELECT a.id FROM numbered a JOIN numbered b ON a.id = b.id WHERE a.val > 20');
+----
+3
+4
+5
+
+query I
+PRAGMA lpts_check('WITH numbered AS (SELECT id, val FROM t) SELECT a.id FROM numbered a JOIN numbered b ON a.id = b.id WHERE a.val > 20');
+----
+true
+
+# Chained CTEs (base → derived): each CTE used once, no materialization
+query II
+PRAGMA lpts_exec('WITH base AS (SELECT id, val FROM t WHERE val > 10), doubled AS (SELECT id, val * 2 AS val FROM base) SELECT id, val FROM doubled ORDER BY id');
+----
+2	40
+3	60
+4	80
+5	100
+
+query I
+PRAGMA lpts_check('WITH base AS (SELECT id, val FROM t WHERE val > 10), doubled AS (SELECT id, val * 2 AS val FROM base) SELECT id, val FROM doubled ORDER BY id');
+----
+true
+
+# CTE with aggregation used twice
+query I
+PRAGMA lpts_check('WITH agg AS (SELECT label, count(*) AS cnt FROM t GROUP BY label) SELECT a1.label FROM agg a1 JOIN agg a2 ON a1.label = a2.label ORDER BY a1.label');
+----
+true

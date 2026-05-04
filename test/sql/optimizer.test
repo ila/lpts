@@ -1,0 +1,105 @@
+# name: test/sql/optimizer.test
+# description: test lpts with optimizer rules selectively disabled — lpts must produce correct results regardless of optimization state
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE t (id INTEGER, val INTEGER, label VARCHAR);
+
+statement ok
+INSERT INTO t VALUES (1, 10, 'x'), (2, 20, 'x'), (3, 30, 'y'), (4, 40, 'y'), (5, 50, 'z');
+
+statement ok
+CREATE TABLE t2 (id INTEGER, score INTEGER);
+
+statement ok
+INSERT INTO t2 VALUES (1, 100), (2, 200), (3, 300);
+
+# ============================================================
+# FILTER_PUSHDOWN disabled
+# Filters are not pushed below joins; they stay as separate
+# FilterNodes above the join in the logical plan.
+# ============================================================
+
+statement ok
+SET disabled_optimizers = 'FILTER_PUSHDOWN';
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM t WHERE val > 20');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM t WHERE val > 10 AND label = ''x''');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT t.id, t2.score FROM t JOIN t2 ON t.id = t2.id WHERE t.val > 10 AND t2.score < 300');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT label, sum(val) FROM t GROUP BY label HAVING sum(val) > 30');
+----
+true
+
+statement ok
+SET disabled_optimizers = '';
+
+# ============================================================
+# JOIN_ORDER disabled
+# DuckDB preserves the join order as written rather than
+# reordering for cardinality; LPTS must still convert correctly.
+# ============================================================
+
+statement ok
+SET disabled_optimizers = 'JOIN_ORDER';
+
+query I
+PRAGMA lpts_check('SELECT t.id, t2.score FROM t JOIN t2 ON t.id = t2.id');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT t.id, t2.score FROM t JOIN t2 ON t.id = t2.id WHERE t.val > 20');
+----
+true
+
+statement ok
+SET disabled_optimizers = '';
+
+# ============================================================
+# FILTER_PUSHDOWN + JOIN_ORDER disabled together
+# ============================================================
+
+statement ok
+SET disabled_optimizers = 'FILTER_PUSHDOWN,JOIN_ORDER';
+
+query I
+PRAGMA lpts_check('SELECT t.id, t2.score FROM t JOIN t2 ON t.id = t2.id WHERE t.val > 10');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT label, sum(val) FROM t GROUP BY label HAVING sum(val) > 30');
+----
+true
+
+statement ok
+SET disabled_optimizers = '';
+
+# ============================================================
+# Optimizer re-enabled: same queries must still pass
+# ============================================================
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM t WHERE val > 20');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT t.id, t2.score FROM t JOIN t2 ON t.id = t2.id WHERE t.val > 10');
+----
+true

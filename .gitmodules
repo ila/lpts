@@ -15,3 +15,6 @@
 [submodule "third_party/lpts"]
 	path = third_party/lpts
 	url = git@github.com:ila/lpts.git
+[submodule "benchmark/sqlstorm/SQLStorm"]
+	path = benchmark/sqlstorm/SQLStorm
+	url = https://github.com/SQL-Storm/SQLStorm.git

@@ -400,7 +400,7 @@ private:
 				expr_str << "TRY(" << ExpressionToAliasedString(op_expr.children[0]) << ")";
 				break;
 			default:
-				throw NotImplementedException("Unsupported BOUND_OPERATOR subtype for ExpressionToAliasedString: %s",
+				throw NotImplementedException("Not implemented BOUND_OPERATOR subtype for ExpressionToAliasedString: %s",
 				                              ExpressionTypeToString(op_expr.GetExpressionType()));
 			}
 			break;
@@ -411,7 +411,7 @@ private:
 			break;
 		}
 		default:
-			throw NotImplementedException("Unsupported expression for ExpressionToAliasedString: %s",
+			throw NotImplementedException("Not implemented expression for ExpressionToAliasedString: %s",
 			                              ExpressionTypeToString(expression->type));
 		}
 		return expr_str.str();
@@ -1115,7 +1115,7 @@ private:
 			} else if (limit_op.limit_val.Type() == LimitNodeType::EXPRESSION_VALUE) {
 				limit_str = ExpressionToAliasedString(const_cast<BoundLimitNode &>(limit_op.limit_val).GetExpression());
 			} else if (limit_op.limit_val.Type() != LimitNodeType::UNSET) {
-				throw NotImplementedException("LPTS: unsupported LIMIT node type");
+				throw NotImplementedException("LPTS: LIMIT node type not implemented");
 			}
 			string offset_str;
 			if (limit_op.offset_val.Type() == LimitNodeType::CONSTANT_VALUE) {
@@ -1124,7 +1124,7 @@ private:
 				offset_str =
 				    ExpressionToAliasedString(const_cast<BoundLimitNode &>(limit_op.offset_val).GetExpression());
 			} else if (limit_op.offset_val.Type() != LimitNodeType::UNSET) {
-				throw NotImplementedException("LPTS: unsupported OFFSET node type");
+				throw NotImplementedException("LPTS: OFFSET node type not implemented");
 			}
 			vector<string> cte_column_names;
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {

@@ -85,7 +85,7 @@ string InsertNode::ToQuery() {
 		insert_str << "OR IGNORE ";
 		break;
 	default:
-		throw NotImplementedException("OnConflictAction::%s is not (yet) supported", EnumUtil::ToString(action_type));
+		throw NotImplementedException("OnConflictAction::%s is not implemented", EnumUtil::ToString(action_type));
 	}
 	insert_str << "INTO ";
 	insert_str << target_table;
@@ -221,7 +221,7 @@ string JoinNode::ToQuery() {
 		join_str << EnumUtil::ToString(join_type);
 		break;
 	default:
-		throw NotImplementedException("JoinType::%s is not (yet) supported", EnumUtil::ToString(join_type));
+		throw NotImplementedException("JoinType::%s is not implemented", EnumUtil::ToString(join_type));
 	}
 	join_str << " JOIN ";
 	// MARK→LEFT joins: deduplicate the right side to prevent left-row multiplication

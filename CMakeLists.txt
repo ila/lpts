@@ -26,3 +26,21 @@ install(
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+set(LPTS_BENCHMARK_LINK_LIBS
+    duckdb_static
+    duckdb_generated_extension_loader
+    ${EXTENSION_NAME}
+    tpch_extension
+    core_functions_extension
+    parquet_extension
+    duckdb_static)
+
+if(DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK)
+    list(APPEND LPTS_BENCHMARK_LINK_LIBS jemalloc_extension)
+endif()
+
+if(NOT EMSCRIPTEN AND NOT WIN32)
+    add_executable(lpts_sqlstorm_benchmark benchmark/sqlstorm/lpts_sqlstorm_benchmark.cpp)
+    target_link_libraries(lpts_sqlstorm_benchmark ${LPTS_BENCHMARK_LINK_LIBS})
+endif()

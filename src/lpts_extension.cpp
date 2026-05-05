@@ -218,6 +218,11 @@ static string LptsExecPragmaFunction(ClientContext &context, const FunctionParam
 //
 // Runs the original query and the LPTS-generated query, then compares results
 // using EXCEPT ALL in both directions. Returns a single boolean column "match".
+//
+// A false result means strict bag equality failed. This can be a real LPTS bug,
+// but it can also happen for SQL with nondeterministic result values, e.g.
+// unordered string_agg/list aggregates, row_number() over tied ORDER BY keys, or
+// ORDER BY ... LIMIT with tied boundary rows.
 //------------------------------------------------------------------------------
 
 static string LptsCheckPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {

@@ -1,0 +1,26 @@
+# name: test/sql/lateral_join.test
+# description: test LPTS round-trips for LATERAL / dependent joins
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE lateral_wh (w_id INTEGER, w_name VARCHAR);
+
+statement ok
+INSERT INTO lateral_wh VALUES (1, 'w1'), (2, 'w2'), (3, 'w3');
+
+query I
+PRAGMA lpts_check('SELECT w_id, slot FROM lateral_wh w CROSS JOIN LATERAL (SELECT generate_series AS slot FROM generate_series(1, w.w_id)) t(slot)');
+----
+true
+
+query II rowsort
+PRAGMA lpts_exec('SELECT w_id, slot FROM lateral_wh w CROSS JOIN LATERAL (SELECT generate_series AS slot FROM generate_series(1, w.w_id)) t(slot)');
+----
+1	1
+2	1
+2	2
+3	1
+3	2
+3	3

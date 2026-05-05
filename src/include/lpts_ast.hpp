@@ -62,12 +62,15 @@ public:
 	vector<string> column_names;     ///< Physical column names (e.g. "age", "name").
 	vector<string> cte_column_names; ///< CTE-scoped names (e.g. "t0_age", "t0_name").
 	vector<string> table_filters;    ///< Pushdown filters (as SQL strings).
+	idx_t table_function_output_count;
 
 	AstGetNode(string catalog, string schema, string table_name, size_t table_index, vector<string> column_names,
-	           vector<string> cte_column_names, vector<string> table_filters)
+	           vector<string> cte_column_names, vector<string> table_filters,
+	           idx_t table_function_output_count = DConstants::INVALID_INDEX)
 	    : catalog(std::move(catalog)), schema(std::move(schema)), table_name(std::move(table_name)),
 	      table_index(table_index), column_names(std::move(column_names)),
-	      cte_column_names(std::move(cte_column_names)), table_filters(std::move(table_filters)) {
+	      cte_column_names(std::move(cte_column_names)), table_filters(std::move(table_filters)),
+	      table_function_output_count(table_function_output_count) {
 	}
 
 	string ToString(int indent = 0) const override;
@@ -114,13 +117,14 @@ public:
 class AstAggregateNode : public AstNode {
 public:
 	vector<string> group_by_columns;      ///< GROUP BY column references (child CTE names).
+	string group_by_clause;               ///< Full GROUP BY clause body; may include GROUPING SETS.
 	vector<string> aggregate_expressions; ///< Aggregate function strings (e.g. "sum(t0_amount)").
 	vector<string> cte_column_names;      ///< CTE-scoped output names (e.g. "t2_region", "t3_aggregate_0").
 
-	AstAggregateNode(vector<string> group_by_columns, vector<string> aggregate_expressions,
+	AstAggregateNode(vector<string> group_by_columns, string group_by_clause, vector<string> aggregate_expressions,
 	                 vector<string> cte_column_names)
-	    : group_by_columns(std::move(group_by_columns)), aggregate_expressions(std::move(aggregate_expressions)),
-	      cte_column_names(std::move(cte_column_names)) {
+	    : group_by_columns(std::move(group_by_columns)), group_by_clause(std::move(group_by_clause)),
+	      aggregate_expressions(std::move(aggregate_expressions)), cte_column_names(std::move(cte_column_names)) {
 	}
 
 	string ToString(int indent = 0) const override;

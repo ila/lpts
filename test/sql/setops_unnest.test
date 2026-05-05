@@ -70,3 +70,25 @@ query I
 PRAGMA lpts_check('SELECT id, unnest(vals) AS val FROM list_t');
 ----
 true
+
+query I
+PRAGMA lpts_check('SELECT unnest([''BC'', ''GC'']) AS credit_type');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT * FROM UNNEST([1, 2, 3]) AS u(val)');
+----
+true
+
+query II rowsort
+PRAGMA lpts_exec('SELECT id, val FROM list_t CROSS JOIN UNNEST(vals) AS u(val)');
+----
+1	10
+1	20
+2	30
+
+query I
+PRAGMA lpts_check('SELECT id, val FROM list_t CROSS JOIN UNNEST(vals) AS u(val)');
+----
+true

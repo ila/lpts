@@ -229,3 +229,31 @@ query I
 PRAGMA lpts_check('SELECT COALESCE(a, b) AS key, a, COUNT(*) FROM coalesce_grp GROUP BY COALESCE(a, b), a');
 ----
 true
+
+# --- GROUP BY ROLLUP preserves grouping sets ---
+
+query I
+PRAGMA lpts_check('SELECT product, region, SUM(amount) FROM sales GROUP BY ROLLUP(product, region) ORDER BY product, region');
+----
+true
+
+# --- GROUP BY CUBE preserves grouping sets ---
+
+query I
+PRAGMA lpts_check('SELECT product, region, SUM(amount) FROM sales GROUP BY CUBE(product, region) ORDER BY product, region');
+----
+true
+
+# --- Explicit GROUPING SETS preserve grouped outputs ---
+
+query I
+PRAGMA lpts_check('SELECT product, region, SUM(amount) FROM sales GROUP BY GROUPING SETS ((product), (region), ()) ORDER BY product, region');
+----
+true
+
+# --- Parent projection/order above ROLLUP aggregate ---
+
+query I
+PRAGMA lpts_check('SELECT product, total_amount FROM (SELECT product, region, SUM(amount) AS total_amount FROM sales GROUP BY ROLLUP(product, region)) rollup_sales WHERE total_amount > 100 ORDER BY product, total_amount');
+----
+true

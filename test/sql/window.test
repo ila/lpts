@@ -49,3 +49,34 @@ query I
 PRAGMA lpts_check('SELECT grp, id, lag(val, 1, -1) OVER (PARTITION BY grp ORDER BY id) AS prev_val, lead(val, 1, -1) OVER (PARTITION BY grp ORDER BY id) AS next_val FROM window_items ORDER BY grp, id');
 ----
 true
+
+# --- materialized CTE refs preserve pruned window CTE column order ---
+
+query I
+PRAGMA lpts_check('WITH ranked AS (SELECT id, grp, val, row_number() OVER (PARTITION BY grp ORDER BY val DESC) AS rn FROM window_items) SELECT grp, string_agg(CAST(val AS VARCHAR), '', '' ORDER BY val) FROM ranked GROUP BY grp ORDER BY grp');
+----
+true
+
+# --- regrouped CTE aggregate columns with duplicate internal names ---
+
+query I
+PRAGMA lpts_check('WITH left_totals AS (SELECT grp, sum(val) AS total FROM window_items GROUP BY grp), right_totals AS (SELECT grp, sum(id) AS total FROM window_items GROUP BY grp) SELECT left_totals.total, right_totals.total, rank() OVER (ORDER BY sum(right_totals.total) DESC) AS total_rank FROM left_totals JOIN right_totals USING (grp) GROUP BY left_totals.total, right_totals.total ORDER BY left_totals.total, right_totals.total');
+----
+true
+
+# --- RANGE frame with INTERVAL boundary expression ---
+
+statement ok
+CREATE TABLE window_history (grp VARCHAR, ts TIMESTAMP, amount INTEGER);
+
+statement ok
+INSERT INTO window_history VALUES
+	('a', '2026-01-01 00:00:00', 5),
+	('a', '2026-01-10 00:00:00', 7),
+	('a', '2026-02-20 00:00:00', 11),
+	('b', '2026-01-05 00:00:00', 13);
+
+query I
+PRAGMA lpts_check('SELECT grp, ts, amount, COUNT(*) OVER (PARTITION BY grp ORDER BY ts RANGE BETWEEN INTERVAL ''30 days'' PRECEDING AND CURRENT ROW) AS rolling_count FROM window_history');
+----
+true

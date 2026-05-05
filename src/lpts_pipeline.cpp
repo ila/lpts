@@ -109,6 +109,27 @@ private:
 		}
 	};
 
+	static unique_ptr<ColStruct> MakeDedupedColumn(idx_t table_index, string column_name, string alias,
+	                                               unordered_set<string> &seen_names, idx_t suffix_seed) {
+		string base_column_name = column_name;
+		string base_alias = alias;
+		idx_t suffix = suffix_seed;
+		while (true) {
+			auto candidate = make_uniq<ColStruct>(table_index, column_name, alias);
+			string unique_name = candidate->ToUniqueColumnName();
+			if (!seen_names.count(unique_name)) {
+				seen_names.insert(unique_name);
+				return candidate;
+			}
+			string suffix_text = "_" + std::to_string(suffix++);
+			if (base_alias.empty()) {
+				column_name = base_column_name + suffix_text;
+			} else {
+				alias = base_alias + suffix_text;
+			}
+		}
+	}
+
 	/// SQL dialect for expression serialization (function renaming, etc.)
 	SqlDialect dialect = SqlDialect::DUCKDB;
 
@@ -143,6 +164,11 @@ private:
 	/// Maps DELIM_GET table_index → source column names (from the outer/left CTE).
 	/// Populated by PreregisterDelimGetColumns before the right subtree is traversed.
 	unordered_map<idx_t, vector<string>> delim_get_source_col_names;
+
+	/// Maps LogicalMaterializedCTE::table_index → the actual body output column names.
+	/// DuckDB can prune unused CTE body columns while LogicalCTERef::bound_columns still
+	/// carries the original user-visible names, so CTE refs must follow the body output arity.
+	unordered_map<idx_t, vector<string>> materialized_cte_body_column_names;
 
 	const unique_ptr<ColStruct> &FindColumnBinding(const ColumnBinding &binding, const char *context) const {
 		auto it = column_map.find(MappableColumnBinding(binding));
@@ -179,6 +205,108 @@ private:
 		}
 		ExpressionIterator::EnumerateChildren(const_cast<Expression &>(expr),
 		                                      [&](Expression &child) { CollectLambdaParamNames(child, names); });
+	}
+
+	static string StripTablePrefix(const string &cte_column_name) {
+		const auto underscore_pos = cte_column_name.find('_');
+		if (underscore_pos != string::npos && underscore_pos + 1 < cte_column_name.size()) {
+			return cte_column_name.substr(underscore_pos + 1);
+		}
+		return cte_column_name;
+	}
+
+	static vector<string> AstOutputColumnNames(const AstNode &node) {
+		const string &type = node.NodeType();
+		if (type == "Get") {
+			return static_cast<const AstGetNode &>(node).cte_column_names;
+		}
+		if (type == "Filter") {
+			D_ASSERT(node.children.size() == 1);
+			return AstOutputColumnNames(*node.children[0]);
+		}
+		if (type == "Project") {
+			return static_cast<const AstProjectNode &>(node).cte_column_names;
+		}
+		if (type == "Aggregate") {
+			return static_cast<const AstAggregateNode &>(node).cte_column_names;
+		}
+		if (type == "Join") {
+			return static_cast<const AstJoinNode &>(node).cte_column_names;
+		}
+		if (type == "Union") {
+			return static_cast<const AstUnionNode &>(node).cte_column_names;
+		}
+		if (type == "SetOperation") {
+			return static_cast<const AstSetOperationNode &>(node).cte_column_names;
+		}
+		if (type == "Order") {
+			return static_cast<const AstOrderNode &>(node).cte_column_names;
+		}
+		if (type == "Limit") {
+			return static_cast<const AstLimitNode &>(node).cte_column_names;
+		}
+		if (type == "Distinct") {
+			return static_cast<const AstDistinctNode &>(node).cte_column_names;
+		}
+		if (type == "CteRef") {
+			return static_cast<const AstCteRefNode &>(node).cte_column_names;
+		}
+		if (type == "DelimGet") {
+			return static_cast<const AstDelimGetNode &>(node).cte_column_names;
+		}
+		if (type == "DelimJoin") {
+			return static_cast<const AstDelimJoinNode &>(node).cte_column_names;
+		}
+		if (type == "MaterializedCte") {
+			D_ASSERT(node.children.size() == 2);
+			return AstOutputColumnNames(*node.children[1]);
+		}
+		if (type == "Insert") {
+			return vector<string>();
+		}
+		throw NotImplementedException("AstBuilder: output columns not implemented for AST node '%s'", type);
+	}
+
+	static string StringAggSeparator(const BoundAggregateExpression &aggregate) {
+		if (aggregate.function.name != "string_agg" || !aggregate.bind_info) {
+			return string();
+		}
+		struct StringAggBindDataLayout {
+			void *vtable;
+			string sep;
+		};
+		return reinterpret_cast<const StringAggBindDataLayout *>(aggregate.bind_info.get())->sep;
+	}
+
+	static string GroupingSetsToClause(const vector<string> &group_names, const vector<GroupingSet> &grouping_sets) {
+		if (grouping_sets.empty()) {
+			return VecToSeparatedList(group_names);
+		}
+		if (grouping_sets.size() == 1) {
+			const auto &grouping_set = grouping_sets[0];
+			if (grouping_set.empty()) {
+				return "()";
+			}
+			vector<string> set_names;
+			for (idx_t group_idx : grouping_set) {
+				set_names.push_back(group_names[group_idx]);
+			}
+			return VecToSeparatedList(set_names);
+		}
+
+		vector<string> set_clauses;
+		for (const auto &grouping_set : grouping_sets) {
+			if (grouping_set.empty()) {
+				set_clauses.push_back("()");
+				continue;
+			}
+			vector<string> set_names;
+			for (idx_t group_idx : grouping_set) {
+				set_names.push_back(group_names[group_idx]);
+			}
+			set_clauses.push_back("(" + VecToSeparatedList(set_names) + ")");
+		}
+		return "GROUPING SETS (" + VecToSeparatedList(set_clauses) + ")";
 	}
 
 	string OrderByToAliasedString(const BoundOrderByNode &order) const {
@@ -272,6 +400,23 @@ private:
 		}
 	}
 
+	string WindowRangeFrameOffsetToAliasedString(const BoundWindowExpression &window,
+	                                             const unique_ptr<Expression> &expr, bool preceding) const {
+		if (!window.orders.empty() && expr && expr->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+			const auto &func_expr = expr->Cast<BoundFunctionExpression>();
+			const string &func_name = func_expr.function.name;
+			if (func_expr.children.size() == 2 &&
+			    ((preceding && func_name == "-") || (!preceding && func_name == "+"))) {
+				string order_expr = ExpressionToAliasedString(window.orders[0].expression);
+				string left_expr = ExpressionToAliasedString(func_expr.children[0]);
+				if (left_expr == order_expr) {
+					return ExpressionToAliasedString(func_expr.children[1]);
+				}
+			}
+		}
+		return ExpressionToAliasedString(expr);
+	}
+
 	string WindowFrameStartToAliasedString(const BoundWindowExpression &window, string &units) const {
 		switch (window.start) {
 		case WindowBoundary::CURRENT_ROW_RANGE:
@@ -285,15 +430,19 @@ private:
 			}
 			return "";
 		case WindowBoundary::EXPR_PRECEDING_ROWS:
-		case WindowBoundary::EXPR_PRECEDING_RANGE:
 		case WindowBoundary::EXPR_PRECEDING_GROUPS:
 			units = WindowFrameUnits(window.start);
 			return ExpressionToAliasedString(window.start_expr) + " PRECEDING";
+		case WindowBoundary::EXPR_PRECEDING_RANGE:
+			units = WindowFrameUnits(window.start);
+			return WindowRangeFrameOffsetToAliasedString(window, window.start_expr, true) + " PRECEDING";
 		case WindowBoundary::EXPR_FOLLOWING_ROWS:
-		case WindowBoundary::EXPR_FOLLOWING_RANGE:
 		case WindowBoundary::EXPR_FOLLOWING_GROUPS:
 			units = WindowFrameUnits(window.start);
 			return ExpressionToAliasedString(window.start_expr) + " FOLLOWING";
+		case WindowBoundary::EXPR_FOLLOWING_RANGE:
+			units = WindowFrameUnits(window.start);
+			return WindowRangeFrameOffsetToAliasedString(window, window.start_expr, false) + " FOLLOWING";
 		case WindowBoundary::INVALID:
 			return "";
 		default:
@@ -318,15 +467,19 @@ private:
 		case WindowBoundary::UNBOUNDED_FOLLOWING:
 			return "UNBOUNDED FOLLOWING";
 		case WindowBoundary::EXPR_PRECEDING_ROWS:
-		case WindowBoundary::EXPR_PRECEDING_RANGE:
 		case WindowBoundary::EXPR_PRECEDING_GROUPS:
 			units = WindowFrameUnits(window.end);
 			return ExpressionToAliasedString(window.end_expr) + " PRECEDING";
+		case WindowBoundary::EXPR_PRECEDING_RANGE:
+			units = WindowFrameUnits(window.end);
+			return WindowRangeFrameOffsetToAliasedString(window, window.end_expr, true) + " PRECEDING";
 		case WindowBoundary::EXPR_FOLLOWING_ROWS:
-		case WindowBoundary::EXPR_FOLLOWING_RANGE:
 		case WindowBoundary::EXPR_FOLLOWING_GROUPS:
 			units = WindowFrameUnits(window.end);
 			return ExpressionToAliasedString(window.end_expr) + " FOLLOWING";
+		case WindowBoundary::EXPR_FOLLOWING_RANGE:
+			units = WindowFrameUnits(window.end);
+			return WindowRangeFrameOffsetToAliasedString(window, window.end_expr, false) + " FOLLOWING";
 		case WindowBoundary::INVALID:
 			return "";
 		default:
@@ -881,11 +1034,26 @@ private:
 					// Table function without catalog entry (e.g. range(), read_csv())
 					std::ostringstream func_str;
 					func_str << get.function.name << "(";
-					for (size_t i = 0; i < get.parameters.size(); i++) {
-						if (i > 0) {
-							func_str << ", ";
+					if (!op->children.empty() && get.parameters.empty()) {
+						const auto child_bindings = op->children[0]->GetColumnBindings();
+						idx_t arg_count = get.function.arguments.size();
+						if (arg_count > child_bindings.size()) {
+							arg_count = child_bindings.size();
 						}
-						func_str << get.parameters[i].ToSQLString();
+						for (idx_t i = 0; i < arg_count; i++) {
+							if (i > 0) {
+								func_str << ", ";
+							}
+							func_str
+							    << FindColumnBinding(child_bindings[i], "table function input")->ToUniqueColumnName();
+						}
+					} else {
+						for (size_t i = 0; i < get.parameters.size(); i++) {
+							if (i > 0) {
+								func_str << ", ";
+							}
+							func_str << get.parameters[i].ToSQLString();
+						}
 					}
 					func_str << ")";
 					table_name = func_str.str();
@@ -898,6 +1066,8 @@ private:
 
 			const vector<ColumnBinding> col_binds = op->GetColumnBindings();
 			const auto col_ids = get.GetColumnIds();
+			const idx_t table_function_output_count =
+			    (!op->children.empty() && catalog_entry == nullptr) ? col_ids.size() : DConstants::INVALID_INDEX;
 
 			LPTS_DEBUG_PRINT("[LPTS-AST] GET: col_binds=" + std::to_string(col_binds.size()) + " col_ids=" +
 			                 std::to_string(col_ids.size()) + " names=" + std::to_string(get.names.size()));
@@ -907,6 +1077,7 @@ private:
 				                 " virtual=" + std::to_string(col_ids[di].IsVirtualColumn()));
 			}
 
+			idx_t table_function_passthrough_idx = 0;
 			for (size_t i = 0; i < col_binds.size(); ++i) {
 				const ColumnBinding &cb = col_binds[i];
 				// The binding's column_index tells us which entry in col_ids
@@ -915,8 +1086,20 @@ private:
 				// differ from the loop index.
 				const idx_t col_id_idx = cb.column_index;
 				if (col_id_idx >= col_ids.size()) {
-					// ROWID-only scan (e.g. COUNT(*)) — register dummy entry.
-					column_map[MappableColumnBinding(cb)] = make_uniq<ColStruct>(table_index, "rowid", "");
+					string col_name = "rowid";
+					if (!op->children.empty() && get.parameters.empty()) {
+						const auto child_bindings = op->children[0]->GetColumnBindings();
+						idx_t child_col_idx = get.function.arguments.size() + table_function_passthrough_idx;
+						if (child_col_idx < child_bindings.size()) {
+							col_name = FindColumnBinding(child_bindings[child_col_idx], "table function passthrough")
+							               ->ToUniqueColumnName();
+						}
+					}
+					table_function_passthrough_idx++;
+					auto col_struct = make_uniq<ColStruct>(table_index, "rowid", "");
+					column_names.push_back(col_name);
+					cte_column_names.push_back(col_struct->ToUniqueColumnName());
+					column_map[MappableColumnBinding(cb)] = std::move(col_struct);
 					continue;
 				}
 				string col_name;
@@ -963,7 +1146,8 @@ private:
 			}
 
 			return make_uniq<AstGetNode>(catalog_name, schema_name, table_name, table_index, std::move(column_names),
-			                             std::move(cte_column_names), std::move(table_filters));
+			                             std::move(cte_column_names), std::move(table_filters),
+			                             table_function_output_count);
 		}
 
 		//----------------------------------------------------------------------
@@ -1129,11 +1313,13 @@ private:
 			vector<string> expressions;
 			vector<string> cte_column_names;
 
-			auto child_bindings = unnest.children[0]->GetColumnBindings();
-			for (auto &binding : child_bindings) {
-				auto &src = FindColumnBinding(binding, "unnest");
-				expressions.push_back(src->ToUniqueColumnName());
-				cte_column_names.push_back(src->ToUniqueColumnName());
+			if (unnest.children[0]->type != LogicalOperatorType::LOGICAL_DUMMY_SCAN) {
+				auto child_bindings = unnest.children[0]->GetColumnBindings();
+				for (auto &binding : child_bindings) {
+					auto &src = FindColumnBinding(binding, "unnest");
+					expressions.push_back(src->ToUniqueColumnName());
+					cte_column_names.push_back(src->ToUniqueColumnName());
+				}
 			}
 
 			for (idx_t i = 0; i < unnest.expressions.size(); i++) {
@@ -1155,6 +1341,7 @@ private:
 			vector<string> group_names;
 			vector<string> agg_expressions;
 			vector<string> cte_column_names;
+			unordered_set<string> seen_names;
 
 			// GROUP BY columns
 			for (size_t i = 0; i < agg.groups.size(); ++i) {
@@ -1169,7 +1356,7 @@ private:
 					}
 					const unique_ptr<ColStruct> &desc = it->second;
 					group_names.push_back(desc->ToUniqueColumnName());
-					auto new_col = make_uniq<ColStruct>(group_table_index, desc->column_name, desc->alias);
+					auto new_col = MakeDedupedColumn(group_table_index, desc->column_name, desc->alias, seen_names, i);
 					cte_column_names.push_back(new_col->ToUniqueColumnName());
 					column_map[MappableColumnBinding(ColumnBinding(group_table_index, i))] = std::move(new_col);
 				} else {
@@ -1177,7 +1364,7 @@ private:
 					string expr_str = ExpressionToAliasedString(g);
 					string alias = g->HasAlias() ? g->GetAlias() : ("grp_" + std::to_string(i));
 					group_names.push_back(expr_str);
-					auto new_col = make_uniq<ColStruct>(group_table_index, expr_str, std::move(alias));
+					auto new_col = MakeDedupedColumn(group_table_index, expr_str, std::move(alias), seen_names, i);
 					cte_column_names.push_back(new_col->ToUniqueColumnName());
 					column_map[MappableColumnBinding(ColumnBinding(group_table_index, i))] = std::move(new_col);
 				}
@@ -1210,6 +1397,15 @@ private:
 					if (ci > 0)
 						agg_str << ", ";
 					agg_str << child_exprs[ci];
+				}
+				if (agg_name == "string_agg") {
+					string separator = StringAggSeparator(ba);
+					if (!separator.empty()) {
+						if (!child_exprs.empty()) {
+							agg_str << ", ";
+						}
+						agg_str << "'" << EscapeSingleQuotes(separator) << "'";
+					}
 				}
 				// Preserve intra-aggregate ORDER BY — matters for LIST, STRING_AGG,
 				// and other order-sensitive aggregates. Drop it only for aggregates
@@ -1244,7 +1440,7 @@ private:
 				}
 				string agg_alias = "aggregate_" + std::to_string(i);
 				agg_expressions.push_back(agg_str.str());
-				auto new_col = make_uniq<ColStruct>(agg_table_index, agg_str.str(), std::move(agg_alias));
+				auto new_col = MakeDedupedColumn(agg_table_index, agg_str.str(), std::move(agg_alias), seen_names, i);
 				cte_column_names.push_back(new_col->ToUniqueColumnName());
 				column_map[MappableColumnBinding(ColumnBinding(agg_table_index, i))] = std::move(new_col);
 			}
@@ -1272,8 +1468,9 @@ private:
 				    make_uniq<ColStruct>(new_col->table_index, new_col->column_name, new_col->alias);
 			}
 
-			return make_uniq<AstAggregateNode>(std::move(group_names), std::move(agg_expressions),
-			                                   std::move(cte_column_names));
+			string group_by_clause = GroupingSetsToClause(group_names, agg.grouping_sets);
+			return make_uniq<AstAggregateNode>(std::move(group_names), std::move(group_by_clause),
+			                                   std::move(agg_expressions), std::move(cte_column_names));
 		}
 
 		//----------------------------------------------------------------------
@@ -1599,9 +1796,22 @@ private:
 			LPTS_DEBUG_PRINT("[LPTS-AST] CTE_REF: table_index=" + std::to_string(table_index) + " cte_index=" +
 			                 std::to_string(cte_index) + " columns=" + std::to_string(cte_ref.bound_columns.size()));
 
-			// Register output columns using the CTE's user-visible column names.
+			// Register output columns using the materialized body's actual output names when available.
+			// DuckDB can prune the body to the columns referenced by the outer query, while bound_columns
+			// still lists the original CTE aliases. Parent bindings are reindexed to the pruned body order.
 			vector<string> cte_column_names;
-			for (size_t i = 0; i < cte_ref.bound_columns.size(); ++i) {
+			auto body_cols_it = materialized_cte_body_column_names.find(cte_index);
+			if (body_cols_it != materialized_cte_body_column_names.end()) {
+				for (idx_t i = 0; i < body_cols_it->second.size(); i++) {
+					string col_name = StripTablePrefix(body_cols_it->second[i]);
+					auto col_struct = make_uniq<ColStruct>(table_index, std::move(col_name), "");
+					cte_column_names.push_back(col_struct->ToUniqueColumnName());
+					column_map[MappableColumnBinding(ColumnBinding(table_index, i))] = std::move(col_struct);
+				}
+				return make_uniq<AstCteRefNode>(cte_index, std::move(cte_column_names));
+			}
+
+			for (idx_t i = 0; i < cte_ref.bound_columns.size(); ++i) {
 				const string &col_name = cte_ref.bound_columns[i];
 				auto col_struct = make_uniq<ColStruct>(table_index, col_name, "");
 				cte_column_names.push_back(col_struct->ToUniqueColumnName());
@@ -1819,6 +2029,12 @@ private:
 			child_nodes[0] = RecursiveTraversal(op->children[outer_idx]);
 			PreregisterDelimGetColumns(op->children[inner_idx].get(), dj.duplicate_eliminated_columns);
 			child_nodes[1] = RecursiveTraversal(op->children[inner_idx]);
+		} else if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+			const LogicalMaterializedCTE &mat_cte = op->Cast<LogicalMaterializedCTE>();
+			child_nodes.resize(2);
+			child_nodes[0] = RecursiveTraversal(op->children[0]);
+			materialized_cte_body_column_names[mat_cte.table_index] = AstOutputColumnNames(*child_nodes[0]);
+			child_nodes[1] = RecursiveTraversal(op->children[1]);
 		} else {
 			for (auto &child : op->children) {
 				child_nodes.push_back(RecursiveTraversal(child));
@@ -2028,8 +2244,10 @@ private:
 			//   Postgres: table                 (e.g. users)
 			string catalog_out = (dialect == SqlDialect::POSTGRES) ? "" : get.catalog;
 			string schema_out = (dialect == SqlDialect::POSTGRES) ? "" : get.schema;
+			string input_cte_name = children_names.empty() ? string() : children_names[0];
 			return make_uniq<GetNode>(my_index, get.cte_column_names, catalog_out, schema_out, get.table_name,
-			                          get.table_index, get.table_filters, get.column_names);
+			                          get.table_index, get.table_filters, get.column_names, input_cte_name,
+			                          get.table_function_output_count);
 		}
 
 		if (type == "Filter") {
@@ -2047,7 +2265,7 @@ private:
 		if (type == "Aggregate") {
 			const AstAggregateNode &agg = static_cast<const AstAggregateNode &>(ast_node);
 			return make_uniq<AggregateNode>(my_index, agg.cte_column_names, children_names[0], agg.group_by_columns,
-			                                agg.aggregate_expressions);
+			                                agg.group_by_clause, agg.aggregate_expressions);
 		}
 
 		if (type == "Join") {

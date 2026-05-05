@@ -142,16 +142,20 @@ class GetNode : public CteNode {
 	size_t table_index;
 	vector<string> table_filters;
 	vector<string> column_names;
+	string input_cte_name;
+	idx_t table_function_output_count;
 
 public:
 	~GetNode() override = default;
 	// Constructor.
 	explicit GetNode(const size_t index, vector<string> cte_column_names, string _catalog, string _schema,
 	                 string _table_name, const size_t _table_index, vector<string> _table_filters,
-	                 vector<string> _column_names)
+	                 vector<string> _column_names, string _input_cte_name = string(),
+	                 idx_t _table_function_output_count = DConstants::INVALID_INDEX)
 	    : CteNode(index, "scan_" + std::to_string(index), std::move(cte_column_names)), catalog(std::move(_catalog)),
 	      schema(std::move(_schema)), table_name(std::move(_table_name)), table_index(_table_index),
-	      table_filters(std::move(_table_filters)), column_names(std::move(_column_names)) {
+	      table_filters(std::move(_table_filters)), column_names(std::move(_column_names)),
+	      input_cte_name(std::move(_input_cte_name)), table_function_output_count(_table_function_output_count) {
 	}
 	// Functions.
 	string ToQuery() override;
@@ -196,16 +200,17 @@ class AggregateNode : public CteNode {
 	// Attributes.
 	string child_cte_name;
 	vector<string> group_by_columns; // If empty, is scalar aggregate (e.g. count(*) with no GROUP BY).
+	string group_by_clause;
 	vector<string> aggregate_expressions;
 
 public:
 	~AggregateNode() override = default;
 	// Constructor.
 	AggregateNode(const size_t index, vector<string> cte_column_names, string _child_cte_name,
-	              vector<string> _group_names, vector<string> _aggregate_names)
+	              vector<string> _group_names, string _group_by_clause, vector<string> _aggregate_names)
 	    : CteNode(index, "aggregate_" + std::to_string(index), std::move(cte_column_names)),
 	      child_cte_name(std::move(_child_cte_name)), group_by_columns(std::move(_group_names)),
-	      aggregate_expressions(std::move(_aggregate_names)) {
+	      group_by_clause(std::move(_group_by_clause)), aggregate_expressions(std::move(_aggregate_names)) {
 	}
 	// Functions.
 	string ToQuery() override;

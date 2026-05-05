@@ -1,4 +1,5 @@
 #include "lpts_ast.hpp"
+#include "lpts_helpers.hpp"
 
 namespace duckdb {
 
@@ -139,6 +140,9 @@ string AstAggregateNode::ToString(int indent) const {
 		}
 		result += "]";
 	}
+	if (!group_by_clause.empty() && group_by_clause != VecToSeparatedList(group_by_columns)) {
+		result += "\n" + Indent(indent + 2) + "group_by_clause: " + group_by_clause;
+	}
 	for (size_t i = 0; i < aggregate_expressions.size(); i++) {
 		result += "\n" + Indent(indent + 2) + cte_column_names[group_by_columns.size() + i] + " <- " +
 		          aggregate_expressions[i];
@@ -161,6 +165,9 @@ InsertionOrderPreservingMap<string> AstAggregateNode::GetExtraInfo() const {
 		}
 		groups += "]";
 		info.insert("Group By", std::move(groups));
+	}
+	if (!group_by_clause.empty() && group_by_clause != VecToSeparatedList(group_by_columns)) {
+		info.insert("Group By Clause", group_by_clause);
 	}
 	for (size_t i = 0; i < aggregate_expressions.size(); i++) {
 		info.insert(cte_column_names[group_by_columns.size() + i], aggregate_expressions[i]);

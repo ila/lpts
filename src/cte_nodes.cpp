@@ -121,6 +121,9 @@ string GetNode::ToQuery() {
 		// Fully-qualified: catalog.schema.table (DuckDB dialect)
 		get_str << QualifiedTableName(catalog, schema, table_name);
 	} else {
+		if (!input_cte_name.empty()) {
+			get_str << input_cte_name << ", ";
+		}
 		// Unqualified: table function or simple table name
 		get_str << table_name;
 		// For table functions, add column aliases so renamed columns resolve correctly.
@@ -128,7 +131,13 @@ string GetNode::ToQuery() {
 		// (snapshot_id, rowid) are in the SELECT but not in the function's output schema.
 		if (table_name.find('(') != string::npos && table_name != "(SELECT 1)" && !column_names.empty() &&
 		    table_name.find("ducklake_table_") == string::npos) {
-			get_str << " _tf(" << VecToSeparatedList(column_names) << ")";
+			idx_t alias_count = table_function_output_count == DConstants::INVALID_INDEX ? column_names.size()
+			                                                                             : table_function_output_count;
+			vector<string> table_function_columns;
+			for (idx_t i = 0; i < alias_count && i < column_names.size(); i++) {
+				table_function_columns.push_back(column_names[i]);
+			}
+			get_str << " _tf(" << VecToSeparatedList(table_function_columns) << ")";
 		}
 	}
 	if (!table_filters.empty()) {
@@ -179,9 +188,9 @@ string AggregateNode::ToQuery() {
 	aggregate_str << VecToSeparatedList(aggregate_expressions);
 	aggregate_str << " FROM ";
 	aggregate_str << child_cte_name;
-	if (!group_by_columns.empty()) {
+	if (!group_by_clause.empty()) {
 		aggregate_str << " GROUP BY ";
-		aggregate_str << VecToSeparatedList(group_by_columns);
+		aggregate_str << group_by_clause;
 	}
 	return aggregate_str.str();
 }

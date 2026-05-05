@@ -10,6 +10,7 @@
 #include "duckdb/main/connection.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -38,13 +39,18 @@ enum class QueryState : uint8_t {
 	LPTS_ERROR = 3,
 	NOT_IMPLEMENTED = 4,
 	TIMEOUT = 5,
-	CRASH = 6
+	CRASH = 6,
+	NONDETERMINISTIC = 7
 };
 
 struct QueryResultSummary {
 	double duckdb_time_ms = 0;
 	double lpts_check_time_ms = 0;
 	QueryState state = QueryState::SUCCESS;
+	bool strict_check_ran = false;
+	bool strict_match = false;
+	string diagnostic_state;
+	string diagnostic_reason;
 	string phase;
 	string error;
 
@@ -61,6 +67,7 @@ struct PassStats {
 	int not_implemented = 0;
 	int timed_out = 0;
 	int crashed = 0;
+	int nondeterministic = 0;
 	double total_duckdb_success_ms = 0;
 	double total_lpts_check_success_ms = 0;
 	std::map<string, int> error_counts;
@@ -68,6 +75,7 @@ struct PassStats {
 	vector<string> incorrect_queries;
 	vector<string> timeout_queries;
 	vector<string> crash_queries;
+	vector<string> nondeterministic_queries;
 };
 
 static string Timestamp() {
@@ -207,9 +215,120 @@ static string StateToString(QueryState state) {
 		return "not_implemented";
 	case QueryState::TIMEOUT:
 		return "timeout";
-	default:
+	case QueryState::CRASH:
 		return "crash";
+	case QueryState::NONDETERMINISTIC:
+		return "nondeterministic";
+	default:
+		return "unknown";
 	}
+}
+
+static string LowerASCII(string input) {
+	std::transform(input.begin(), input.end(), input.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return input;
+}
+
+static bool ContainsInsensitive(const string &haystack, const string &needle) {
+	return LowerASCII(haystack).find(LowerASCII(needle)) != string::npos;
+}
+
+static string NormalizeWhitespaceASCII(const string &input) {
+	string result;
+	bool last_was_space = true;
+	for (char c : input) {
+		if (std::isspace(static_cast<unsigned char>(c))) {
+			if (!last_was_space) {
+				result += ' ';
+				last_was_space = true;
+			}
+			continue;
+		}
+		result += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		last_was_space = false;
+	}
+	if (!result.empty() && result.back() != ' ') {
+		result += ' ';
+	}
+	return " " + result;
+}
+
+static bool ContainsNormalizedPhrase(const string &sql, const string &phrase) {
+	return NormalizeWhitespaceASCII(sql).find(NormalizeWhitespaceASCII(phrase)) != string::npos;
+}
+
+static string ExtractFunctionCall(const string &sql, idx_t open_paren) {
+	idx_t depth = 0;
+	bool in_string = false;
+	for (idx_t i = open_paren; i < sql.size(); i++) {
+		char c = sql[i];
+		if (c == '\'') {
+			if (in_string && i + 1 < sql.size() && sql[i + 1] == '\'') {
+				i++;
+				continue;
+			}
+			in_string = !in_string;
+			continue;
+		}
+		if (in_string) {
+			continue;
+		}
+		if (c == '(') {
+			depth++;
+		} else if (c == ')') {
+			if (depth == 0) {
+				return string();
+			}
+			depth--;
+			if (depth == 0) {
+				return sql.substr(open_paren + 1, i - open_paren - 1);
+			}
+		}
+	}
+	return string();
+}
+
+static bool HasUnorderedAggregateCall(const string &sql, const string &function_name) {
+	string lower_sql = LowerASCII(sql);
+	string needle = LowerASCII(function_name) + "(";
+	idx_t pos = lower_sql.find(needle);
+	while (pos != string::npos) {
+		string args = ExtractFunctionCall(sql, pos + function_name.size());
+		if (!args.empty() && !ContainsInsensitive(args, "order by")) {
+			return true;
+		}
+		pos = lower_sql.find(needle, pos + needle.size());
+	}
+	return false;
+}
+
+static bool IsLikelyNondeterministicSQL(const string &sql, string &reason) {
+	if (HasUnorderedAggregateCall(sql, "string_agg")) {
+		reason = "unordered string_agg aggregate";
+		return true;
+	}
+	if (HasUnorderedAggregateCall(sql, "listagg")) {
+		reason = "unordered listagg aggregate";
+		return true;
+	}
+	if (HasUnorderedAggregateCall(sql, "list") || HasUnorderedAggregateCall(sql, "array_agg")) {
+		reason = "unordered order-sensitive aggregate";
+		return true;
+	}
+	if (ContainsNormalizedPhrase(sql, "row_number() over")) {
+		reason = "row_number over potentially tied ordering keys";
+		return true;
+	}
+	if (ContainsNormalizedPhrase(sql, "limit") && ContainsNormalizedPhrase(sql, "order by")) {
+		reason = "ORDER BY with LIMIT/OFFSET may have tied boundary rows";
+		return true;
+	}
+	if (ContainsNormalizedPhrase(sql, "fetch first") && ContainsNormalizedPhrase(sql, "order by")) {
+		reason = "ORDER BY with FETCH FIRST may have tied boundary rows";
+		return true;
+	}
+	return false;
 }
 
 static string TrimError(string error) {
@@ -394,10 +513,24 @@ static void ConfigureConnection(Connection &con) {
 					summary.state = QueryState::LPTS_ERROR;
 				} else {
 					auto match_value = check_result->GetValue(0, 0);
-					summary.state = match_value.ToString() == "true" ? QueryState::SUCCESS : QueryState::INCORRECT;
-					if (summary.state == QueryState::INCORRECT) {
+					summary.strict_check_ran = true;
+					summary.strict_match = match_value.ToString() == "true";
+					if (summary.strict_match) {
+						summary.state = QueryState::SUCCESS;
+						summary.diagnostic_state = "strict_match";
+					} else {
 						summary.phase = "lpts_check";
-						summary.error = "lpts_check returned false";
+						string diagnostic_reason;
+						if (IsLikelyNondeterministicSQL(sql, diagnostic_reason)) {
+							summary.state = QueryState::NONDETERMINISTIC;
+							summary.diagnostic_state = "nondeterministic";
+							summary.diagnostic_reason = diagnostic_reason;
+							summary.error = diagnostic_reason;
+						} else {
+							summary.state = QueryState::INCORRECT;
+							summary.diagnostic_state = "strict_mismatch";
+							summary.error = "lpts_check returned false";
+						}
 					}
 				}
 			}
@@ -406,6 +539,18 @@ static void ConfigureConnection(Connection &con) {
 			WriteAllBytes(write_fd, &summary.duckdb_time_ms, sizeof(summary.duckdb_time_ms));
 			WriteAllBytes(write_fd, &summary.lpts_check_time_ms, sizeof(summary.lpts_check_time_ms));
 			WriteAllBytes(write_fd, &state, sizeof(state));
+			WriteAllBytes(write_fd, &summary.strict_check_ran, sizeof(summary.strict_check_ran));
+			WriteAllBytes(write_fd, &summary.strict_match, sizeof(summary.strict_match));
+			uint32_t diagnostic_state_len = static_cast<uint32_t>(summary.diagnostic_state.size());
+			WriteAllBytes(write_fd, &diagnostic_state_len, sizeof(diagnostic_state_len));
+			if (diagnostic_state_len > 0) {
+				WriteAllBytes(write_fd, summary.diagnostic_state.data(), diagnostic_state_len);
+			}
+			uint32_t diagnostic_reason_len = static_cast<uint32_t>(summary.diagnostic_reason.size());
+			WriteAllBytes(write_fd, &diagnostic_reason_len, sizeof(diagnostic_reason_len));
+			if (diagnostic_reason_len > 0) {
+				WriteAllBytes(write_fd, summary.diagnostic_reason.data(), diagnostic_reason_len);
+			}
 			uint32_t phase_len = static_cast<uint32_t>(summary.phase.size());
 			WriteAllBytes(write_fd, &phase_len, sizeof(phase_len));
 			if (phase_len > 0) {
@@ -568,6 +713,31 @@ struct ForkWorker {
 				}
 				result.state = static_cast<QueryState>(state);
 
+				if (!ReadAllBytes(from_child_fd, &result.strict_check_ran, sizeof(result.strict_check_ran)) ||
+				    !ReadAllBytes(from_child_fd, &result.strict_match, sizeof(result.strict_match))) {
+					return SR_CHILD_DIED;
+				}
+				uint32_t diagnostic_state_len = 0;
+				if (!ReadAllBytes(from_child_fd, &diagnostic_state_len, sizeof(diagnostic_state_len))) {
+					return SR_CHILD_DIED;
+				}
+				if (diagnostic_state_len > 0) {
+					result.diagnostic_state.resize(diagnostic_state_len);
+					if (!ReadAllBytes(from_child_fd, &result.diagnostic_state[0], diagnostic_state_len)) {
+						return SR_CHILD_DIED;
+					}
+				}
+				uint32_t diagnostic_reason_len = 0;
+				if (!ReadAllBytes(from_child_fd, &diagnostic_reason_len, sizeof(diagnostic_reason_len))) {
+					return SR_CHILD_DIED;
+				}
+				if (diagnostic_reason_len > 0) {
+					result.diagnostic_reason.resize(diagnostic_reason_len);
+					if (!ReadAllBytes(from_child_fd, &result.diagnostic_reason[0], diagnostic_reason_len)) {
+						return SR_CHILD_DIED;
+					}
+				}
+
 				uint32_t phase_len = 0;
 				if (!ReadAllBytes(from_child_fd, &phase_len, sizeof(phase_len))) {
 					return SR_CHILD_DIED;
@@ -685,6 +855,10 @@ static void TrackStats(PassStats &stats, const string &name, const QueryResultSu
 		stats.crashed++;
 		stats.crash_queries.push_back(name);
 		break;
+	case QueryState::NONDETERMINISTIC:
+		stats.nondeterministic++;
+		stats.nondeterministic_queries.push_back(name);
+		break;
 	}
 
 	if (!summary.error.empty()) {
@@ -716,6 +890,8 @@ static void PrintStats(const PassStats &stats, int total) {
 	Log("  Success:      " + std::to_string(stats.success) + " (" + FormatNumber(100.0 * stats.success / total) + "%)");
 	Log("  Incorrect:    " + std::to_string(stats.incorrect) + " (" +
 	    FormatNumber(100.0 * stats.incorrect / total) + "%)");
+	Log("  Nondeterministic: " + std::to_string(stats.nondeterministic) + " (" +
+	    FormatNumber(100.0 * stats.nondeterministic / total) + "%)");
 	Log("  DuckDB error: " + std::to_string(stats.duckdb_error) + " (" +
 	    FormatNumber(100.0 * stats.duckdb_error / total) + "%)");
 	Log("  LPTS error:   " + std::to_string(stats.lpts_error) + " (" +
@@ -733,6 +909,10 @@ static void PrintStats(const PassStats &stats, int total) {
 	if (!stats.incorrect_queries.empty()) {
 		Log("=== Incorrect queries (" + std::to_string(stats.incorrect_queries.size()) + ") ===");
 		Log("  queries: " + FormatQueryList(stats.incorrect_queries));
+	}
+	if (!stats.nondeterministic_queries.empty()) {
+		Log("=== Nondeterministic queries (" + std::to_string(stats.nondeterministic_queries.size()) + ") ===");
+		Log("  queries: " + FormatQueryList(stats.nondeterministic_queries));
 	}
 	if (!stats.timeout_queries.empty()) {
 		Log("=== Timeouts (" + std::to_string(stats.timeout_queries.size()) + ") ===");
@@ -770,12 +950,16 @@ static bool WriteCSV(const string &out_csv, const vector<string> &query_files,
 		Log("ERROR: Cannot open CSV for writing: " + out_csv);
 		return false;
 	}
-	out << "query_index,query,duckdb_time_ms,lpts_check_time_ms,state,phase,error\n";
+	out << "query_index,query,duckdb_time_ms,lpts_check_time_ms,state,strict_match,diagnostic_state,"
+	       "diagnostic_reason,phase,error\n";
 	for (size_t i = 0; i < query_files.size() && i < summaries.size(); ++i) {
 		const auto &summary = summaries[i];
+		string strict_match =
+		    summary.strict_check_ran ? (summary.strict_match ? "true" : "false") : string();
 		out << (i + 1) << "," << EscapeCSV(QueryName(query_files[i])) << "," << std::fixed << std::setprecision(3)
 		    << summary.duckdb_time_ms << "," << summary.lpts_check_time_ms << ","
-		    << StateToString(summary.state) << "," << EscapeCSV(summary.phase) << ","
+		    << StateToString(summary.state) << "," << strict_match << "," << EscapeCSV(summary.diagnostic_state)
+		    << "," << EscapeCSV(summary.diagnostic_reason) << "," << EscapeCSV(summary.phase) << ","
 		    << EscapeCSV(summary.error) << "\n";
 	}
 	Log("CSV written to: " + out_csv);
@@ -865,11 +1049,11 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			if ((i + 1) % log_interval == 0 || i + 1 == total) {
 				Log("[" + std::to_string(i + 1) + "/" + std::to_string(total) + "] success=" +
 				    std::to_string(stats.success) + " incorrect=" + std::to_string(stats.incorrect) +
+				    " nondeterministic=" + std::to_string(stats.nondeterministic) +
 				    " duckdb_error=" + std::to_string(stats.duckdb_error) +
 				    " lpts_error=" + std::to_string(stats.lpts_error) +
-				    " not_implemented=" + std::to_string(stats.not_implemented) +
-				    " timeout=" + std::to_string(stats.timed_out) + " crash=" +
-				    std::to_string(stats.crashed));
+				    " not_implemented=" + std::to_string(stats.not_implemented) + " timeout=" +
+				    std::to_string(stats.timed_out) + " crash=" + std::to_string(stats.crashed));
 			}
 		}
 

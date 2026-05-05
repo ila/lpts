@@ -179,6 +179,23 @@ private:
 		                        (unsigned long long)binding.table_index, (unsigned long long)binding.column_index);
 	}
 
+	void RegisterChildBindingFallbacks(Expression &expr, const vector<ColumnBinding> &child_bindings) {
+		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &bcr = expr.Cast<BoundColumnRefExpression>();
+			if (column_map.find(MappableColumnBinding(bcr.binding)) == column_map.end() &&
+			    bcr.binding.column_index < child_bindings.size()) {
+				auto &src = FindColumnBinding(child_bindings[bcr.binding.column_index], "projection fallback");
+				column_map[MappableColumnBinding(bcr.binding)] =
+				    make_uniq<ColStruct>(src->table_index, src->column_name, src->alias);
+			}
+		}
+		ExpressionIterator::EnumerateChildren(expr, [&](unique_ptr<Expression> &child) {
+			if (child) {
+				RegisterChildBindingFallbacks(*child, child_bindings);
+			}
+		});
+	}
+
 	//--------------------------------------------------------------------------
 	// CollectLambdaParamNames
 	//
@@ -1287,6 +1304,9 @@ private:
 					cte_column_names.push_back(new_col->ToUniqueColumnName());
 					column_map[MappableColumnBinding(new_cb)] = std::move(new_col);
 				} else {
+					if (!proj.children.empty()) {
+						RegisterChildBindingFallbacks(*expr, proj.children[0]->GetColumnBindings());
+					}
 					string expr_str = ExpressionToAliasedString(expr);
 					expressions.emplace_back(expr_str);
 					string scalar_alias = expr->HasAlias() ? expr->GetAlias() : "scalar_" + std::to_string(i);
@@ -1477,7 +1497,14 @@ private:
 		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
 			const LogicalComparisonJoin &join_op = op->Cast<LogicalComparisonJoin>();
 			vector<string> conditions;
+			vector<ColumnBinding> child_bindings;
+			for (auto &child : op->children) {
+				auto bindings = child->GetColumnBindings();
+				child_bindings.insert(child_bindings.end(), bindings.begin(), bindings.end());
+			}
 			for (const auto &cond : join_op.conditions) {
+				RegisterChildBindingFallbacks(*cond.left, child_bindings);
+				RegisterChildBindingFallbacks(*cond.right, child_bindings);
 				string lhs = ExpressionToAliasedString(cond.left);
 				string rhs = ExpressionToAliasedString(cond.right);
 				string cmp = ExpressionTypeToOperator(cond.comparison);
@@ -1929,7 +1956,14 @@ private:
 			}
 
 			vector<string> conditions;
+			vector<ColumnBinding> child_bindings;
+			for (auto &child : op->children) {
+				auto bindings = child->GetColumnBindings();
+				child_bindings.insert(child_bindings.end(), bindings.begin(), bindings.end());
+			}
 			for (const auto &cond : dj.conditions) {
+				RegisterChildBindingFallbacks(*cond.left, child_bindings);
+				RegisterChildBindingFallbacks(*cond.right, child_bindings);
 				if (cond.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 					auto &bcr = cond.left->Cast<BoundColumnRefExpression>();
 					LPTS_DEBUG_PRINT(

@@ -56,11 +56,7 @@ string FinalReadNode::ToQuery() {
 	// Assign the final column names to the CTE column names. Format: "cte_col AS final_col".
 	merged_list.reserve(col_count);
 	for (size_t i = 0; i < final_column_list.size(); ++i) {
-		// Quote final column names that contain special characters (e.g. "sum(salary)")
-		string final_name = final_column_list[i];
-		if (final_name.find_first_of("()*, ") != string::npos) {
-			final_name = "\"" + final_name + "\"";
-		}
+		string final_name = KeywordHelper::WriteOptionallyQuoted(final_column_list[i]);
 		merged_list.emplace_back(child_cte_column_list[i] + " AS " + final_name);
 	}
 	std::ostringstream sql_str;
@@ -229,6 +225,11 @@ string JoinNode::ToQuery() {
 	case JoinType::ANTI:
 		join_str << EnumUtil::ToString(join_type);
 		break;
+	case JoinType::SINGLE:
+		// DuckDB uses SINGLE joins for scalar subqueries. They behave like a
+		// LEFT join when the RHS has at most one matching row per LHS row.
+		join_str << "LEFT";
+		break;
 	default:
 		throw NotImplementedException("JoinType::%s is not implemented", EnumUtil::ToString(join_type));
 	}
@@ -302,10 +303,20 @@ string LimitNode::ToQuery() {
 	std::ostringstream limit_str_stream;
 	limit_str_stream << "SELECT * FROM " << child_cte_name;
 	if (!limit_str.empty()) {
-		limit_str_stream << " LIMIT " << limit_str;
+		limit_str_stream << " LIMIT ";
+		if (limit_needs_child_scalar) {
+			limit_str_stream << "(SELECT first(" << limit_str << ") FROM " << child_cte_name << ")";
+		} else {
+			limit_str_stream << limit_str;
+		}
 	}
 	if (!offset_str.empty()) {
-		limit_str_stream << " OFFSET " << offset_str;
+		limit_str_stream << " OFFSET ";
+		if (offset_needs_child_scalar) {
+			limit_str_stream << "(SELECT first(" << offset_str << ") FROM " << child_cte_name << ")";
+		} else {
+			limit_str_stream << offset_str;
+		}
 	}
 	return limit_str_stream.str();
 }

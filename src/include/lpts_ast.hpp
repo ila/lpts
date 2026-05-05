@@ -226,12 +226,16 @@ public:
 /// LIMIT / OFFSET node.
 class AstLimitNode : public AstNode {
 public:
-	string limit_str;                ///< e.g. "10", or empty if no LIMIT.
-	string offset_str;               ///< e.g. "5", or empty if no OFFSET.
+	string limit_str;  ///< e.g. "10", or empty if no LIMIT.
+	string offset_str; ///< e.g. "5", or empty if no OFFSET.
+	bool limit_needs_child_scalar;
+	bool offset_needs_child_scalar;
 	vector<string> cte_column_names; ///< passthrough from child.
 
-	AstLimitNode(string limit_str, string offset_str, vector<string> cte_column_names)
+	AstLimitNode(string limit_str, string offset_str, bool limit_needs_child_scalar, bool offset_needs_child_scalar,
+	             vector<string> cte_column_names)
 	    : limit_str(std::move(limit_str)), offset_str(std::move(offset_str)),
+	      limit_needs_child_scalar(limit_needs_child_scalar), offset_needs_child_scalar(offset_needs_child_scalar),
 	      cte_column_names(std::move(cte_column_names)) {
 	}
 

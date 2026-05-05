@@ -1,0 +1,35 @@
+# name: test/sql/sqlstorm_errors.test
+# description: focused regressions from SQLStorm LPTS error buckets
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE sqlstorm_percentile_items (grp INTEGER, val DECIMAL(10, 2));
+
+statement ok
+INSERT INTO sqlstorm_percentile_items VALUES (1, 10.00), (1, 20.00), (1, 30.00), (2, 5.00), (2, 15.00);
+
+# Ordered-set percentile is planned as quantile_cont with the percentile stored in bind data.
+query I
+PRAGMA lpts_check('SELECT percentile_cont(0.75) WITHIN GROUP (ORDER BY val) AS p75 FROM sqlstorm_percentile_items');
+----
+true
+
+statement ok
+CREATE TABLE sqlstorm_offset_orders (id INTEGER, price INTEGER);
+
+statement ok
+INSERT INTO sqlstorm_offset_orders VALUES (1, 100), (2, 90), (3, 80), (4, 70), (5, 60);
+
+# Expression OFFSET may be bound as a scalar column carried through the child CTE.
+query I
+PRAGMA lpts_check('SELECT id, price FROM sqlstorm_offset_orders ORDER BY price DESC LIMIT 2 OFFSET (SELECT COUNT(*) FROM sqlstorm_offset_orders) / 5');
+----
+true
+
+# Original SQL with a semicolon followed by a trailing comment must still be embeddable in lpts_check.
+query I
+PRAGMA lpts_check('SELECT id FROM sqlstorm_offset_orders ORDER BY id; -- trailing SQLStorm comment');
+----
+true

@@ -1,0 +1,29 @@
+# name: test/sql/single_join.test
+# description: scalar subquery SINGLE join round-trip coverage
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE single_join_lineitem (orderkey INTEGER, partkey INTEGER);
+
+statement ok
+CREATE TABLE single_join_orders (orderkey INTEGER, custkey INTEGER);
+
+statement ok
+CREATE TABLE single_join_customer (custkey INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO single_join_lineitem VALUES (10, 1), (20, 2), (30, 3);
+
+statement ok
+INSERT INTO single_join_orders VALUES (10, 100), (20, 200), (30, 300);
+
+statement ok
+INSERT INTO single_join_customer VALUES (100, 'alice'), (200, 'bob'), (300, 'carol');
+
+# Correlated scalar subquery in a JOIN predicate plans as JoinType::SINGLE.
+query I
+PRAGMA lpts_check('SELECT l.partkey, c.name FROM single_join_lineitem l JOIN single_join_customer c ON c.custkey = (SELECT o.custkey FROM single_join_orders o WHERE o.orderkey = l.orderkey) ORDER BY l.partkey');
+----
+true

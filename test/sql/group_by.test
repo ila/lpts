@@ -251,6 +251,18 @@ PRAGMA lpts_check('SELECT product, region, SUM(amount) FROM sales GROUP BY GROUP
 ----
 true
 
+# --- GROUPING() function output from aggregate ---
+
+query I
+PRAGMA lpts_check('SELECT product, GROUPING(product) AS product_grouping, SUM(amount) FROM sales GROUP BY product ORDER BY product');
+----
+true
+
+query I
+PRAGMA lpts_check('SELECT product, region, GROUPING(product) AS product_grouping, GROUPING(region) AS region_grouping, SUM(amount) FROM sales GROUP BY ROLLUP(product, region) ORDER BY product, region, product_grouping, region_grouping');
+----
+true
+
 # --- Parent projection/order above ROLLUP aggregate ---
 
 query I

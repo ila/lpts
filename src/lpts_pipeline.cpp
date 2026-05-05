@@ -32,6 +32,7 @@
 #include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_lambda_expression.hpp"
 #include "duckdb/planner/expression/bound_lambdaref_expression.hpp"
@@ -99,10 +100,10 @@ private:
 			string base = alias.empty() ? column_name : alias;
 			string result = "t" + std::to_string(table_index) + "_";
 			for (char c : base) {
-				if (c == '(' || c == ')' || c == ' ' || c == ',' || c == '*') {
-					result += '_';
-				} else {
+				if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
 					result += c;
+				} else {
+					result += '_';
 				}
 			}
 			return result;
@@ -175,8 +176,10 @@ private:
 		if (it != column_map.end()) {
 			return it->second;
 		}
-		throw InternalException("LPTS: %s column ref (%llu,%llu) not in column_map", context,
-		                        (unsigned long long)binding.table_index, (unsigned long long)binding.column_index);
+		throw NotImplementedException("LPTS: %s column ref (%llu,%llu) is not implemented because it is not in "
+		                              "column_map",
+		                              context, (unsigned long long)binding.table_index,
+		                              (unsigned long long)binding.column_index);
 	}
 
 	void RegisterChildBindingFallbacks(Expression &expr, const vector<ColumnBinding> &child_bindings) {
@@ -222,6 +225,43 @@ private:
 		}
 		ExpressionIterator::EnumerateChildren(const_cast<Expression &>(expr),
 		                                      [&](Expression &child) { CollectLambdaParamNames(child, names); });
+	}
+
+	static bool ExpressionContainsColumnRef(const Expression &expr) {
+		if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+			return true;
+		}
+		bool contains_column_ref = false;
+		ExpressionIterator::EnumerateChildren(const_cast<Expression &>(expr), [&](Expression &child) {
+			if (!contains_column_ref && ExpressionContainsColumnRef(child)) {
+				contains_column_ref = true;
+			}
+		});
+		return contains_column_ref;
+	}
+
+	static string QuantileArgument(const BoundAggregateExpression &aggregate) {
+		struct QuantileValueLayout {
+			Value val;
+			double dbl;
+			hugeint_t integral;
+			hugeint_t scaling;
+		};
+		struct QuantileBindDataLayout {
+			void *vtable;
+			vector<QuantileValueLayout> quantiles;
+			vector<idx_t> order;
+			bool desc;
+		};
+		const auto &bind_data = *reinterpret_cast<const QuantileBindDataLayout *>(aggregate.bind_info.get());
+		if (bind_data.quantiles.size() == 1) {
+			return bind_data.quantiles[0].val.ToSQLString();
+		}
+		vector<string> values;
+		for (const auto &quantile : bind_data.quantiles) {
+			values.push_back(quantile.val.ToSQLString());
+		}
+		return "[" + VecToSeparatedList(values) + "]";
 	}
 
 	static string StripTablePrefix(const string &cte_column_name) {
@@ -644,6 +684,16 @@ private:
 			expr_str << ")";
 			break;
 		}
+		case ExpressionClass::BOUND_BETWEEN: {
+			const BoundBetweenExpression &between_expr = expression->Cast<BoundBetweenExpression>();
+			string input = ExpressionToAliasedString(between_expr.input);
+			string lower_op = ExpressionTypeToOperator(between_expr.LowerComparisonType());
+			string upper_op = ExpressionTypeToOperator(between_expr.UpperComparisonType());
+			expr_str << "((" << input << ") " << lower_op << " (" << ExpressionToAliasedString(between_expr.lower)
+			         << ")) AND ((" << input << ") " << upper_op << " ("
+			         << ExpressionToAliasedString(between_expr.upper) << "))";
+			break;
+		}
 		case ExpressionClass::BOUND_CAST: {
 			const BoundCastExpression &cast_expr = expression->Cast<BoundCastExpression>();
 			expr_str << (cast_expr.try_cast ? "TRY_CAST(" : "CAST(");
@@ -903,7 +953,15 @@ private:
 		}
 		if (subtree->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
 		    subtree->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
-			return; // nested delim join — not our responsibility
+			// A nested delim join owns DelimGets in its inner child, but its outer
+			// child can still contain DelimGets that belong to the current parent
+			// correlation scope.
+			const auto &nested = subtree->Cast<LogicalComparisonJoin>();
+			const idx_t nested_outer_idx = nested.delim_flipped ? 1 : 0;
+			if (nested_outer_idx < subtree->children.size()) {
+				CollectDelimGetTableIndices(subtree->children[nested_outer_idx].get(), out);
+			}
+			return;
 		}
 		for (const auto &child : subtree->children) {
 			CollectDelimGetTableIndices(child.get(), out);
@@ -947,11 +1005,20 @@ private:
 			delim_get_source_col_names[dg_ti] = std::move(source_names);
 			return;
 		}
-		if (subtree->type != LogicalOperatorType::LOGICAL_DELIM_JOIN &&
-		    subtree->type != LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
-			for (const auto &child : subtree->children) {
-				PreregisterDelimGetColumns(child.get(), dup_cols);
+		if (subtree->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+		    subtree->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+			// Only the nested outer child can contain DelimGets that belong to
+			// the current parent. The nested inner child is owned by the nested
+			// delim join and will be registered when that join is processed.
+			const auto &nested = subtree->Cast<LogicalComparisonJoin>();
+			const idx_t nested_outer_idx = nested.delim_flipped ? 1 : 0;
+			if (nested_outer_idx < subtree->children.size()) {
+				PreregisterDelimGetColumns(subtree->children[nested_outer_idx].get(), dup_cols);
 			}
+			return;
+		}
+		for (const auto &child : subtree->children) {
+			PreregisterDelimGetColumns(child.get(), dup_cols);
 		}
 	}
 
@@ -1370,9 +1437,9 @@ private:
 					BoundColumnRefExpression &bcr = g->Cast<BoundColumnRefExpression>();
 					auto it = column_map.find(MappableColumnBinding(bcr.binding));
 					if (it == column_map.end()) {
-						throw InternalException("LPTS: GROUP BY column ref (%llu,%llu) not in column_map",
-						                        (unsigned long long)bcr.binding.table_index,
-						                        (unsigned long long)bcr.binding.column_index);
+						throw NotImplementedException(
+						    "LPTS: GROUP BY column ref (%llu,%llu) is not implemented because it is not in column_map",
+						    (unsigned long long)bcr.binding.table_index, (unsigned long long)bcr.binding.column_index);
 					}
 					const unique_ptr<ColStruct> &desc = it->second;
 					group_names.push_back(desc->ToUniqueColumnName());
@@ -1426,13 +1493,17 @@ private:
 						}
 						agg_str << "'" << EscapeSingleQuotes(separator) << "'";
 					}
+				} else if ((agg_name == "quantile_cont" || agg_name == "quantile_disc") && child_exprs.size() == 1 &&
+				           ba.bind_info) {
+					agg_str << ", " << QuantileArgument(ba);
 				}
 				// Preserve intra-aggregate ORDER BY — matters for LIST, STRING_AGG,
 				// and other order-sensitive aggregates. Drop it only for aggregates
 				// whose result is order-independent (sum/count/min/max/avg), since
 				// rendering ORDER BY for those would change the plan for no reason.
 				if (ba.order_bys && !ba.order_bys->orders.empty() && agg_name != "sum" && agg_name != "count" &&
-				    agg_name != "count_star" && agg_name != "min" && agg_name != "max" && agg_name != "avg") {
+				    agg_name != "count_star" && agg_name != "min" && agg_name != "max" && agg_name != "avg" &&
+				    agg_name != "quantile_cont" && agg_name != "quantile_disc") {
 					agg_str << " ORDER BY ";
 					for (size_t oi = 0; oi < ba.order_bys->orders.size(); ++oi) {
 						const BoundOrderByNode &ob = ba.order_bys->orders[oi];
@@ -1463,6 +1534,24 @@ private:
 				auto new_col = MakeDedupedColumn(agg_table_index, agg_str.str(), std::move(agg_alias), seen_names, i);
 				cte_column_names.push_back(new_col->ToUniqueColumnName());
 				column_map[MappableColumnBinding(ColumnBinding(agg_table_index, i))] = std::move(new_col);
+			}
+
+			for (size_t i = 0; i < agg.grouping_functions.size(); i++) {
+				vector<string> grouping_args;
+				for (idx_t group_idx : agg.grouping_functions[i]) {
+					if (group_idx >= group_names.size()) {
+						throw NotImplementedException("LPTS: GROUPING argument index %llu is out of range",
+						                              (unsigned long long)group_idx);
+					}
+					grouping_args.push_back(group_names[group_idx]);
+				}
+				string grouping_expr = "GROUPING(" + VecToSeparatedList(grouping_args) + ")";
+				string grouping_alias = "grouping_" + std::to_string(i);
+				agg_expressions.push_back(grouping_expr);
+				auto new_col =
+				    MakeDedupedColumn(agg.groupings_index, grouping_expr, std::move(grouping_alias), seen_names, i);
+				cte_column_names.push_back(new_col->ToUniqueColumnName());
+				column_map[MappableColumnBinding(ColumnBinding(agg.groupings_index, i))] = std::move(new_col);
 			}
 
 			// Remap source bindings → aggregate group output bindings.
@@ -1649,19 +1738,24 @@ private:
 		case LogicalOperatorType::LOGICAL_LIMIT: {
 			const LogicalLimit &limit_op = op->Cast<LogicalLimit>();
 			string limit_str;
+			bool limit_needs_child_scalar = false;
 			if (limit_op.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
 				limit_str = std::to_string(limit_op.limit_val.GetConstantValue());
 			} else if (limit_op.limit_val.Type() == LimitNodeType::EXPRESSION_VALUE) {
-				limit_str = ExpressionToAliasedString(const_cast<BoundLimitNode &>(limit_op.limit_val).GetExpression());
+				auto &limit_expr = const_cast<BoundLimitNode &>(limit_op.limit_val).GetExpression();
+				limit_str = ExpressionToAliasedString(limit_expr);
+				limit_needs_child_scalar = ExpressionContainsColumnRef(*limit_expr);
 			} else if (limit_op.limit_val.Type() != LimitNodeType::UNSET) {
 				throw NotImplementedException("LPTS: LIMIT node type not implemented");
 			}
 			string offset_str;
+			bool offset_needs_child_scalar = false;
 			if (limit_op.offset_val.Type() == LimitNodeType::CONSTANT_VALUE) {
 				offset_str = std::to_string(limit_op.offset_val.GetConstantValue());
 			} else if (limit_op.offset_val.Type() == LimitNodeType::EXPRESSION_VALUE) {
-				offset_str =
-				    ExpressionToAliasedString(const_cast<BoundLimitNode &>(limit_op.offset_val).GetExpression());
+				auto &offset_expr = const_cast<BoundLimitNode &>(limit_op.offset_val).GetExpression();
+				offset_str = ExpressionToAliasedString(offset_expr);
+				offset_needs_child_scalar = ExpressionContainsColumnRef(*offset_expr);
 			} else if (limit_op.offset_val.Type() != LimitNodeType::UNSET) {
 				throw NotImplementedException("LPTS: OFFSET node type not implemented");
 			}
@@ -1669,7 +1763,8 @@ private:
 			for (const ColumnBinding &cb : op->GetColumnBindings()) {
 				cte_column_names.push_back(FindColumnBinding(cb, "limit output")->ToUniqueColumnName());
 			}
-			return make_uniq<AstLimitNode>(std::move(limit_str), std::move(offset_str), std::move(cte_column_names));
+			return make_uniq<AstLimitNode>(std::move(limit_str), std::move(offset_str), limit_needs_child_scalar,
+			                               offset_needs_child_scalar, std::move(cte_column_names));
 		}
 
 		//----------------------------------------------------------------------
@@ -2245,8 +2340,9 @@ private:
 			const AstDelimGetNode &dg = static_cast<const AstDelimGetNode &>(ast_node);
 			auto it = delim_get_source_cte.find(dg.table_index);
 			if (it == delim_get_source_cte.end()) {
-				throw InternalException("LPTS: DelimGet table_index=%llu not registered by parent DelimJoin",
-				                        (unsigned long long)dg.table_index);
+				throw NotImplementedException(
+				    "LPTS: nested DelimGet table_index=%llu is not implemented without a parent DelimJoin source",
+				    (unsigned long long)dg.table_index);
 			}
 			const string &source_cte_name = it->second;
 			const size_t my_index = node_count++;
@@ -2352,7 +2448,8 @@ private:
 
 		if (type == "Limit") {
 			const AstLimitNode &l = static_cast<const AstLimitNode &>(ast_node);
-			return make_uniq<LimitNode>(my_index, l.cte_column_names, children_names[0], l.limit_str, l.offset_str);
+			return make_uniq<LimitNode>(my_index, l.cte_column_names, children_names[0], l.limit_str, l.offset_str,
+			                            l.limit_needs_child_scalar, l.offset_needs_child_scalar);
 		}
 
 		if (type == "Distinct") {

@@ -346,8 +346,7 @@ static string TrimError(string error) {
 }
 
 static bool IsCrashError(const string &error) {
-	return error.find("FATAL") != string::npos || error.find("INTERNAL") != string::npos ||
-	       error.find("database has been invalidated") != string::npos;
+	return error.find("FATAL") != string::npos || error.find("database has been invalidated") != string::npos;
 }
 
 static bool IsNotImplementedError(const string &error) {

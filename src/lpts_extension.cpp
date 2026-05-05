@@ -115,6 +115,23 @@ static unique_ptr<LogicalOperator> PlanQuery(ClientContext &context, const strin
 	return result;
 }
 
+static string StripTrailingSemicolon(string sql) {
+	while (!sql.empty() &&
+	       (sql.back() == ';' || sql.back() == ' ' || sql.back() == '\n' || sql.back() == '\r' || sql.back() == '\t')) {
+		sql.pop_back();
+	}
+	return sql;
+}
+
+static string FirstStatementSqlForSubquery(const string &query) {
+	Parser parser;
+	parser.ParseQuery(query);
+	if (parser.statements.empty()) {
+		throw ParserException("Failed to parse query: %s", query);
+	}
+	return StripTrailingSemicolon(parser.statements[0]->ToString());
+}
+
 //------------------------------------------------------------------------------
 // PRAGMA lpts('query') — converts a SQL query's logical plan to a SQL string.
 //
@@ -234,14 +251,11 @@ static string LptsCheckPragmaFunction(ClientContext &context, const FunctionPara
 	auto cte_list = AstToCteList(*ast, dialect);
 	string lpts_sql = cte_list->ToQuery(true);
 
-	// Strip trailing semicolons for use as subqueries
-	string orig = query;
-	while (!orig.empty() && (orig.back() == ';' || orig.back() == ' ' || orig.back() == '\n')) {
-		orig.pop_back();
-	}
-	while (!lpts_sql.empty() && (lpts_sql.back() == ';' || lpts_sql.back() == ' ' || lpts_sql.back() == '\n')) {
-		lpts_sql.pop_back();
-	}
+	// Normalize the original query to DuckDB's first parsed statement before embedding
+	// it as a subquery. Raw SQLStorm inputs often end with "LIMIT ...; -- comment",
+	// where simply trimming the last character leaves a semicolon inside the subquery.
+	string orig = FirstStatementSqlForSubquery(query);
+	lpts_sql = StripTrailingSemicolon(std::move(lpts_sql));
 
 	string escaped_lpts = EscapeSingleQuotes(lpts_sql);
 

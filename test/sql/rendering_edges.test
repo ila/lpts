@@ -1,0 +1,40 @@
+# name: test/sql/rendering_edges.test
+# description: regression tests for fragile SQL rendering and binding edges
+# group: [sql]
+
+require lpts
+
+statement ok
+CREATE TABLE rendering_edges (grp VARCHAR, item VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO rendering_edges VALUES
+	('a', 'x', 10),
+	('a', 'y', 20),
+	('a', 'z', 30),
+	('b', 'x', 5),
+	('b', 'y', 15);
+
+# string_agg bind data supplies the separator; ORDER BY keeps the aggregate deterministic.
+query I
+PRAGMA lpts_check('SELECT grp, string_agg(item, '':'' ORDER BY item) FROM rendering_edges GROUP BY grp ORDER BY grp');
+----
+true
+
+# quantile_cont bind data supplies the quantile argument.
+query I
+PRAGMA lpts_check('SELECT grp, quantile_cont(amount, 0.5) FROM rendering_edges GROUP BY grp ORDER BY grp');
+----
+true
+
+# Multiple quantiles render as a list argument.
+query I
+PRAGMA lpts_check('SELECT grp, quantile_cont(amount, [0.25, 0.75]) FROM rendering_edges GROUP BY grp ORDER BY grp');
+----
+true
+
+# GROUPING() over grouping sets exercises aggregate output remapping.
+query I
+PRAGMA lpts_check('SELECT grp, item, GROUPING(grp), GROUPING(item), sum(amount) FROM rendering_edges GROUP BY ROLLUP (grp, item) ORDER BY grp NULLS LAST, item NULLS LAST');
+----
+true

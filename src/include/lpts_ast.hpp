@@ -21,13 +21,21 @@ namespace duckdb {
 //
 // Class hierarchy:
 //   AstNode (abstract base)
-//   ├── AstGetNode        — table scan       (fully implemented)
-//   ├── AstFilterNode     — WHERE clause     (skeleton + TODO)
-//   ├── AstProjectNode    — column selection  (skeleton + TODO)
-//   ├── AstAggregateNode  — GROUP BY         (skeleton + TODO)
-//   ├── AstJoinNode       — JOIN             (skeleton + TODO)
-//   ├── AstUnionNode      — UNION            (skeleton + TODO)
-//   └── AstInsertNode     — INSERT INTO      (skeleton + TODO)
+//   ├── AstGetNode             — table scan
+//   ├── AstFilterNode          — WHERE clause
+//   ├── AstProjectNode         — column selection
+//   ├── AstAggregateNode       — GROUP BY
+//   ├── AstJoinNode            — JOIN
+//   ├── AstUnionNode           — UNION
+//   ├── AstSetOperationNode    — EXCEPT / INTERSECT
+//   ├── AstInsertNode          — INSERT INTO
+//   ├── AstOrderNode           — ORDER BY
+//   ├── AstLimitNode           — LIMIT / OFFSET
+//   ├── AstDistinctNode        — SELECT DISTINCT
+//   ├── AstMaterializedCteNode — materialized CTE wrapper
+//   ├── AstCteRefNode          — materialized CTE reference
+//   ├── AstDelimGetNode        — duplicate-eliminated correlation scan
+//   └── AstDelimJoinNode       — decorrelated subquery join
 //==============================================================================
 
 /// Abstract base class for all AST nodes.
@@ -43,6 +51,9 @@ public:
 
 	/// Return the type name of this node (e.g. "Get", "Filter").
 	virtual string NodeType() const = 0;
+
+	/// Return this node's CTE-scoped output column names.
+	virtual vector<string> OutputColumnNames() const = 0;
 
 	/// Return key-value pairs for box-rendered extra info (used by RenderAstTree).
 	virtual InsertionOrderPreservingMap<string> GetExtraInfo() const;
@@ -77,6 +88,9 @@ public:
 	string NodeType() const override {
 		return "Get";
 	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
+	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
@@ -91,6 +105,10 @@ public:
 	string ToString(int indent = 0) const override;
 	string NodeType() const override {
 		return "Filter";
+	}
+	vector<string> OutputColumnNames() const override {
+		D_ASSERT(children.size() == 1);
+		return children[0]->OutputColumnNames();
 	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
@@ -109,6 +127,9 @@ public:
 	string ToString(int indent = 0) const override;
 	string NodeType() const override {
 		return "Project";
+	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
 	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
@@ -131,6 +152,9 @@ public:
 	string NodeType() const override {
 		return "Aggregate";
 	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
+	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
@@ -152,6 +176,9 @@ public:
 	string NodeType() const override {
 		return "Join";
 	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
+	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
@@ -168,6 +195,9 @@ public:
 	string ToString(int indent = 0) const override;
 	string NodeType() const override {
 		return "Union";
+	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
 	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
@@ -187,6 +217,9 @@ public:
 	string NodeType() const override {
 		return "SetOperation";
 	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
+	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
@@ -204,6 +237,9 @@ public:
 	string NodeType() const override {
 		return "Insert";
 	}
+	vector<string> OutputColumnNames() const override {
+		return vector<string>();
+	}
 	InsertionOrderPreservingMap<string> GetExtraInfo() const override;
 };
 
@@ -220,6 +256,9 @@ public:
 	string ToString(int indent = 0) const override;
 	string NodeType() const override {
 		return "Order";
+	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
 	}
 };
 
@@ -243,6 +282,9 @@ public:
 	string NodeType() const override {
 		return "Limit";
 	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
+	}
 };
 
 /// SELECT DISTINCT node.
@@ -256,6 +298,9 @@ public:
 	string ToString(int indent = 0) const override;
 	string NodeType() const override {
 		return "Distinct";
+	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
 	}
 };
 
@@ -273,6 +318,10 @@ public:
 	string NodeType() const override {
 		return "MaterializedCte";
 	}
+	vector<string> OutputColumnNames() const override {
+		D_ASSERT(children.size() == 2);
+		return children[1]->OutputColumnNames();
+	}
 };
 
 /// CTE reference node: a scan of a previously-defined materialized CTE body.
@@ -289,6 +338,9 @@ public:
 	string ToString(int indent = 0) const override;
 	string NodeType() const override {
 		return "CteRef";
+	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
 	}
 };
 
@@ -309,6 +361,9 @@ public:
 	string ToString(int indent = 0) const override;
 	string NodeType() const override {
 		return "DelimGet";
+	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
 	}
 };
 
@@ -333,6 +388,9 @@ public:
 	string ToString(int indent = 0) const override;
 	string NodeType() const override {
 		return "DelimJoin";
+	}
+	vector<string> OutputColumnNames() const override {
+		return cte_column_names;
 	}
 };
 

@@ -85,6 +85,19 @@ private:
 		}
 	};
 
+	static string SanitizeIdentifierFragment(const string &input) {
+		string result;
+		result.reserve(input.size());
+		for (char c : input) {
+			if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+				result += c;
+			} else {
+				result += '_';
+			}
+		}
+		return result.empty() ? "col" : result;
+	}
+
 	/// Metadata for one column as it flows through the plan.
 	struct ColStruct {
 		const idx_t table_index;
@@ -98,15 +111,7 @@ private:
 		/// Produce "t{table_index}_{alias || column_name}".
 		string ToUniqueColumnName() const {
 			string base = alias.empty() ? column_name : alias;
-			string result = "t" + std::to_string(table_index) + "_";
-			for (char c : base) {
-				if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
-					result += c;
-				} else {
-					result += '_';
-				}
-			}
-			return result;
+			return "t" + std::to_string(table_index) + "_" + SanitizeIdentifierFragment(base);
 		}
 	};
 
@@ -241,6 +246,9 @@ private:
 	}
 
 	static string QuantileArgument(const BoundAggregateExpression &aggregate) {
+		// DuckDB does not expose quantile arguments through the aggregate children after binding.
+		// Keep this layout-dependent access isolated so a future DuckDB upgrade has one place
+		// to update if QuantileBindData changes.
 		struct QuantileValueLayout {
 			Value val;
 			double dbl;
@@ -272,62 +280,12 @@ private:
 		return cte_column_name;
 	}
 
-	static vector<string> AstOutputColumnNames(const AstNode &node) {
-		const string &type = node.NodeType();
-		if (type == "Get") {
-			return static_cast<const AstGetNode &>(node).cte_column_names;
-		}
-		if (type == "Filter") {
-			D_ASSERT(node.children.size() == 1);
-			return AstOutputColumnNames(*node.children[0]);
-		}
-		if (type == "Project") {
-			return static_cast<const AstProjectNode &>(node).cte_column_names;
-		}
-		if (type == "Aggregate") {
-			return static_cast<const AstAggregateNode &>(node).cte_column_names;
-		}
-		if (type == "Join") {
-			return static_cast<const AstJoinNode &>(node).cte_column_names;
-		}
-		if (type == "Union") {
-			return static_cast<const AstUnionNode &>(node).cte_column_names;
-		}
-		if (type == "SetOperation") {
-			return static_cast<const AstSetOperationNode &>(node).cte_column_names;
-		}
-		if (type == "Order") {
-			return static_cast<const AstOrderNode &>(node).cte_column_names;
-		}
-		if (type == "Limit") {
-			return static_cast<const AstLimitNode &>(node).cte_column_names;
-		}
-		if (type == "Distinct") {
-			return static_cast<const AstDistinctNode &>(node).cte_column_names;
-		}
-		if (type == "CteRef") {
-			return static_cast<const AstCteRefNode &>(node).cte_column_names;
-		}
-		if (type == "DelimGet") {
-			return static_cast<const AstDelimGetNode &>(node).cte_column_names;
-		}
-		if (type == "DelimJoin") {
-			return static_cast<const AstDelimJoinNode &>(node).cte_column_names;
-		}
-		if (type == "MaterializedCte") {
-			D_ASSERT(node.children.size() == 2);
-			return AstOutputColumnNames(*node.children[1]);
-		}
-		if (type == "Insert") {
-			return vector<string>();
-		}
-		throw NotImplementedException("AstBuilder: output columns not implemented for AST node '%s'", type);
-	}
-
 	static string StringAggSeparator(const BoundAggregateExpression &aggregate) {
 		if (aggregate.function.name != "string_agg" || !aggregate.bind_info) {
 			return string();
 		}
+		// DuckDB stores the separator in string_agg bind data instead of aggregate children.
+		// Keep this layout-dependent access isolated; rendering_edges.test covers it.
 		struct StringAggBindDataLayout {
 			void *vtable;
 			string sep;
@@ -346,6 +304,9 @@ private:
 			}
 			vector<string> set_names;
 			for (idx_t group_idx : grouping_set) {
+				if (group_idx >= group_names.size()) {
+					throw InternalException("LPTS: GROUPING SETS group index out of bounds");
+				}
 				set_names.push_back(group_names[group_idx]);
 			}
 			return VecToSeparatedList(set_names);
@@ -359,6 +320,9 @@ private:
 			}
 			vector<string> set_names;
 			for (idx_t group_idx : grouping_set) {
+				if (group_idx >= group_names.size()) {
+					throw InternalException("LPTS: GROUPING SETS group index out of bounds");
+				}
 				set_names.push_back(group_names[group_idx]);
 			}
 			set_clauses.push_back("(" + VecToSeparatedList(set_names) + ")");
@@ -1971,10 +1935,9 @@ private:
 				if (it != column_map.end()) {
 					cte_column_names.push_back(it->second->ToUniqueColumnName());
 				} else {
-					// Fallback: parent DELIM_JOIN should have pre-registered these.
-					auto col_struct = make_uniq<ColStruct>(table_index, "c" + std::to_string(i), "");
-					cte_column_names.push_back(col_struct->ToUniqueColumnName());
-					column_map[MappableColumnBinding(ColumnBinding(table_index, i))] = std::move(col_struct);
+					throw NotImplementedException("LPTS: DELIM_GET column (%llu,%llu) is not implemented because "
+					                              "it was not pre-registered by its parent DELIM_JOIN",
+					                              (unsigned long long)table_index, (unsigned long long)i);
 				}
 			}
 
@@ -1983,7 +1946,9 @@ private:
 			if (src_it != delim_get_source_col_names.end()) {
 				source_col_names = src_it->second;
 			} else {
-				source_col_names = cte_column_names;
+				throw NotImplementedException("LPTS: DELIM_GET table_index %llu is not implemented because its "
+				                              "source columns were not registered by its parent DELIM_JOIN",
+				                              (unsigned long long)table_index);
 			}
 
 			return make_uniq<AstDelimGetNode>(table_index, std::move(cte_column_names), std::move(source_col_names));
@@ -2162,7 +2127,7 @@ private:
 			const LogicalMaterializedCTE &mat_cte = op->Cast<LogicalMaterializedCTE>();
 			child_nodes.resize(2);
 			child_nodes[0] = RecursiveTraversal(op->children[0]);
-			materialized_cte_body_column_names[mat_cte.table_index] = AstOutputColumnNames(*child_nodes[0]);
+			materialized_cte_body_column_names[mat_cte.table_index] = child_nodes[0]->OutputColumnNames();
 			child_nodes[1] = RecursiveTraversal(op->children[1]);
 		} else {
 			for (auto &child : op->children) {

@@ -257,8 +257,6 @@ static string LptsCheckPragmaFunction(ClientContext &context, const FunctionPara
 	string orig = FirstStatementSqlForSubquery(query);
 	lpts_sql = StripTrailingSemicolon(std::move(lpts_sql));
 
-	string escaped_lpts = EscapeSingleQuotes(lpts_sql);
-
 	// Compare: no rows in (A EXCEPT ALL B) AND no rows in (B EXCEPT ALL A)
 	return "SELECT "
 	       "(SELECT count(*) FROM ((" +
@@ -340,7 +338,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto lpts_exec_pragma = PragmaFunction::PragmaCall("lpts_exec", LptsExecPragmaFunction, {LogicalType::VARCHAR});
 	loader.RegisterFunction(lpts_exec_pragma);
 
-	// Register PRAGMA lpts_check('query') — round-trip correctness check
+	// Register PRAGMA lpts_check('query') — strict bag round-trip check.
+	// It can return false for semantically equivalent SQL when the query result
+	// is nondeterministic, e.g. unordered aggregates, LIMIT ties, NULL ties, or
+	// window functions with non-unique ordering keys.
 	auto lpts_check_pragma = PragmaFunction::PragmaCall("lpts_check", LptsCheckPragmaFunction, {LogicalType::VARCHAR});
 	loader.RegisterFunction(lpts_check_pragma);
 
